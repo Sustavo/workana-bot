@@ -1,0 +1,16 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+data/workana.db
+data/chrome-profile/
+data/logs/
+data/pending/
+data/sent/
+data/rejected/
+data/previews/
+
+# Prints e HTMLs salvos pelo usuário (locais, não commitar)
+prints e explicações/

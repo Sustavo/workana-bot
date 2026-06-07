@@ -1,0 +1,58 @@
+# Perfil profissional usado pela IA pra gerar propostas.
+# Editado por você — quanto mais real e específico, melhor a proposta.
+
+name: "Gustavo Sousa"
+
+# Headline curta que abre a proposta (1 frase, tom natural).
+headline: "Desenvolvedor fullstack e designer com 6 anos de experiência."
+
+# Anos de experiência (número usado no prompt).
+years_experience: 6
+
+# Stack/skills principais. Ordem importa — primeiras são as suas top.
+skills:
+  - TypeScript
+  - React
+  - Next.js
+  - Node.js
+  - Python
+  - UI/UX Design
+  - Tailwind CSS
+  - PostgreSQL
+  - Integrações de pagamento (Pagar.me, PagBank, Stripe, Asaas)
+  - Inteligência Artificial (Claude, Gemini, OpenAI)
+
+# Idiomas que você fala (afeta para quais vagas pode propor).
+languages: [pt, en]
+
+# O que você NÃO faz — a IA vai filtrar e o matcher vai vetar.
+do_not_take:
+  - WordPress
+  - PHP legado
+  - Projetos de "urgência" sem contexto
+  - Estágio / vagas CLT
+
+# Links de portfólio (entram na proposta quando relevante).
+portfolio_links:
+  - "https://github.com/SEU_USER"   # ← TROCAR
+  - "https://SEU_SITE.com"          # ← TROCAR
+
+# ── IDs dos 3 itens do seu portfólio Workana que serão selecionados como destaque
+# no formulário de bid. Pega esses IDs assim:
+# 1) Vai em https://www.workana.com/freelancer/<seu_hash>
+# 2) Inspeciona um item de portfólio com F12 → procura `data-id` ou URL do projeto
+# 3) Cola os 3 IDs aqui. Se deixar vazio, o submitter vai pular essa etapa
+#    e logar um aviso (pode falhar se o Workana exigir os 3).
+featured_portfolio_ids: []
+
+# Faixa de valor/hora em BRL (referência pro Gemini calcular preço justo).
+hourly_rate_brl_min: 5
+hourly_rate_brl_max: 5000
+
+# Bio curta que você usaria como abertura genérica (a IA pode adaptar).
+bio: |
+  Sou desenvolvedor fullstack e designer com 6 anos de experiência,
+  com forte foco em frontend pixel-perfect (React/Next/TS), integrações
+  de pagamento e construção de produtos com IA. Já trabalhei como dev
+  da Renner e tenho experiência tanto em refatoração quanto em criação
+  do zero.

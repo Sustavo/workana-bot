@@ -1,0 +1,32 @@
+# Critérios para decidir se uma vaga vira proposta.
+# Lê em src/filters/matcher.py.
+
+# Palavras que SE aparecerem no título/descrição, descartam a vaga.
+blocked_keywords:
+  - wordpress
+  - php legado
+  - estagiário
+  - estagiario
+  - urgente!!
+  - urgent only
+  - clt
+  - presencial
+
+# Palavras que DEVEM aparecer (qualquer uma). Vazio = não filtra por keyword positivo.
+required_keywords_any: []
+
+# Categorias permitidas. Vazio = todas as que estiverem no feed URL.
+allowed_categories: []
+
+# Categorias bloqueadas.
+blocked_categories:
+  - "Suporte Administrativo"
+  - "Vendas e Marketing"
+
+# Orçamento mínimo em USD. Vagas declaradas abaixo disso são puladas.
+# 0 = sem mínimo.
+min_budget_usd: 0
+
+# Faixa de número de propostas concorrentes que aceitamos.
+# Acima desse teto, vaga é "saturada" e pulamos.
+max_competing_proposals: 25
