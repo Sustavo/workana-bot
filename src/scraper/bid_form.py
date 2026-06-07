@@ -1,9 +1,17 @@
+import re
+import time
 from dataclasses import dataclass
+from pathlib import Path
 
 from loguru import logger
 from playwright.sync_api import Page, TimeoutError as PWTimeout
 
 from src.utils.delays import short_jitter
+
+_MIN_BID_RE = re.compile(
+    r"(?:lance|valor|or[çc]amento)\s*m[íi]nimo[^R$\d]{0,30}(?:R\$|BRL)?\s*([\d\.\,]+)",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -21,15 +29,50 @@ def open_bid_page(page: Page, job_slug: str) -> None:
     page.wait_for_selector("form#bidForm", timeout=15_000)
 
 
-def read_min_amount(page: Page) -> float | None:
-    el = page.query_selector("input#Amount")
-    if not el:
+def _parse_amount(text: str) -> float | None:
+    """Parseia '7.331,00' (BR), '7331.00' (US), '7.331' (milhar BR), '160' etc."""
+    if not text:
         return None
-    val = el.get_attribute("min")
+    s = text.strip()
+    has_comma = "," in s
+    if has_comma:
+        s = s.replace(".", "").replace(",", ".")
+    else:
+        if "." in s:
+            tail = s.rsplit(".", 1)[1]
+            if len(tail) == 3:
+                s = s.replace(".", "")
     try:
-        return float(val) if val else None
+        return float(s)
     except ValueError:
         return None
+
+
+def read_min_amount(page: Page) -> float | None:
+    """Mínimo do bid: maior valor entre input#Amount[min] e texto 'Lance mínimo: R$ X'."""
+    candidates: list[float] = []
+
+    el = page.query_selector("input#Amount")
+    if el:
+        val = el.get_attribute("min")
+        if val:
+            try:
+                candidates.append(float(val))
+            except ValueError:
+                pass
+
+    try:
+        body = page.inner_text("body", timeout=3000)
+        m = _MIN_BID_RE.search(body)
+        if m:
+            v = _parse_amount(m.group(1))
+            if v:
+                candidates.append(v)
+                logger.debug("Lance mínimo detectado via texto: R$ {}", v)
+    except Exception:
+        pass
+
+    return max(candidates) if candidates else None
 
 
 def is_hourly_form(page: Page) -> bool:
@@ -45,47 +88,92 @@ def is_hourly_form(page: Page) -> bool:
 
 
 def ensure_skill_selected(page: Page, fallback_skill: str) -> bool:
-    """Workana pré-seleciona até 3 skills. Se nada selecionado, pesquisa e adiciona uma."""
+    """Garante pelo menos 1 skill marcada. Estratégias em ordem:
+    1) Já tem skills selecionadas → ok.
+    2) Clica num chip visível e não-selecionado (Workana costuma sugerir vários).
+    3) Digita no campo de busca e clica num item do dropdown.
+    NUNCA pressiona Enter (isso pula pro próximo passo e quebra o fluxo)."""
     selected = page.query_selector_all("label.skill.like-chip.selected, label.skill.selected")
     if selected:
         logger.debug("{} skills já selecionadas — ok", len(selected))
         return True
 
+    chips = page.query_selector_all("label.skill.like-chip:not(.selected), label.skill:not(.selected)")
+    for chip in chips:
+        try:
+            if not chip.is_visible():
+                continue
+            chip.scroll_into_view_if_needed(timeout=2000)
+            short_jitter()
+            chip.click()
+            txt = (chip.inner_text() or "").strip()
+            logger.info("Skill chip clicado: '{}'", txt[:40])
+            return True
+        except Exception:
+            continue
+
     search = page.query_selector("input.multi-select-search-field, input[placeholder*='Pesquisar habilidade']")
     if not search:
-        logger.warning("Campo 'Pesquisar habilidade' não encontrado — pulando skill fallback")
+        logger.warning("Sem chips visíveis e sem campo 'Pesquisar habilidade' — pulando skills")
         return False
 
     try:
+        search.scroll_into_view_if_needed(timeout=2000)
         search.click()
         short_jitter()
         search.fill(fallback_skill)
-        page.wait_for_timeout(800)
-        suggestion = page.query_selector(
-            ".multi-select-options li:first-child, .multi-select-search-results li:first-child, ul.suggestions li:first-child"
+        page.wait_for_timeout(1200)
+
+        dropdown_selectors = [
+            ".multi-select-options li:visible",
+            ".multi-select-search-results li:visible",
+            ".dropdown-menu li:visible",
+            "ul.suggestions li:visible",
+            ".skills-for-steps li:not(.multi-select-search):visible",
+            ".skills-select li:not(.multi-select-search):visible",
+            ".tt-suggestion:visible",
+            ".autocomplete-suggestion:visible",
+        ]
+        for sel in dropdown_selectors:
+            try:
+                el = page.query_selector(sel)
+                if el:
+                    el.click()
+                    logger.info("Skill via dropdown '{}'", sel)
+                    return True
+            except Exception:
+                continue
+
+        dump_dir = Path("data/insights/debug")
+        dump_dir.mkdir(parents=True, exist_ok=True)
+        dump = dump_dir / f"skill-fail-{int(time.time())}.html"
+        try:
+            dump.write_text(page.content(), encoding="utf-8")
+        except Exception:
+            pass
+        logger.warning(
+            "Nenhum dropdown de skill encontrado após digitar '{}'. HTML salvo em {}",
+            fallback_skill, dump,
         )
-        if suggestion:
-            suggestion.click()
-        else:
-            page.keyboard.press("Enter")
-        short_jitter()
-        logger.info("Skill fallback '{}' adicionada", fallback_skill)
-        return True
+        return False
     except Exception as e:
         logger.warning("Falha adicionando skill fallback '{}': {}", fallback_skill, e)
         return False
 
 
-def fill_form(page: Page, payload: BidPayload) -> None:
+def fill_form(page: Page, payload: BidPayload, fill_delivery_time: bool = False) -> None:
     page.fill("textarea#BidContent", payload.content)
     short_jitter()
     page.fill("input#Amount", str(payload.amount))
     short_jitter()
-    try:
-        page.fill("input#BidDeliveryTime", payload.delivery_time)
-        short_jitter()
-    except Exception:
-        logger.debug("Campo BidDeliveryTime ausente (provável form por hora)")
+    if fill_delivery_time:
+        try:
+            page.fill("input#BidDeliveryTime", payload.delivery_time)
+            short_jitter()
+        except Exception:
+            logger.debug("Campo BidDeliveryTime ausente (provável form por hora)")
+    else:
+        logger.debug("Pulando preenchimento de 'Prazo de entrega' (FILL_DELIVERY_TIME=false)")
     if payload.hours is not None:
         hours_el = page.query_selector("input#Hours")
         if hours_el and hours_el.is_visible():

@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from urllib.parse import urljoin
 
 from loguru import logger
-from playwright.sync_api import Page
+from playwright.sync_api import Page, TimeoutError as PWTimeout
 
 
 @dataclass
@@ -25,7 +25,11 @@ def _slug_from_url(url: str) -> str:
 
 
 def scrape_page(page: Page) -> list[JobCard]:
-    page.wait_for_selector(".project-item", timeout=15_000)
+    try:
+        page.wait_for_selector(".project-item", timeout=8_000)
+    except PWTimeout:
+        logger.info("Sem .project-item em {} — fim do feed", page.url)
+        return []
     cards = page.query_selector_all(".project-item.js-project, .project-item")
     out: list[JobCard] = []
     for c in cards:

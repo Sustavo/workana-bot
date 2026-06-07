@@ -23,7 +23,6 @@ Você responderá APENAS com JSON no formato:
 def build_user_prompt(job: dict, insight: dict | None, discount_pct: float = 0.15) -> str:
     avg_value = (insight or {}).get("avg_bid_value")
     avg_text = (insight or {}).get("avg_bid_text") or "desconhecida"
-    competitors = (insight or {}).get("competitor_count")
 
     target_line = ""
     if avg_value:
@@ -33,13 +32,12 @@ def build_user_prompt(job: dict, insight: dict | None, discount_pct: float = 0.1
     return f"""## Vaga
 Título: {job.get("title")}
 Orçamento declarado pelo cliente: {job.get("budget_text")}
-Skills exigidas: {", ".join(job.get("skills") or [])}
+Skills exigidas: {", ".join(job.get("skills") or []) }
 País do cliente: {job.get("client_country") or "?"}
 Status: {job.get("proposals_status") or "?"}
 
 ## Concorrência
-Média de bid: {avg_text}
-Concorrentes: {competitors if competitors is not None else "?"}{target_line}
+Média de bid: {avg_text}{target_line}
 
 ## Descrição da vaga
 {job.get("description") or "(sem descrição)"}

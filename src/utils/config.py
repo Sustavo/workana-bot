@@ -23,6 +23,7 @@ class Settings:
     database_path: Path
     log_level: str
     log_file: Path
+    fill_delivery_time: bool
 
     @classmethod
     def load(cls) -> "Settings":
@@ -37,11 +38,12 @@ class Settings:
             chrome_profile_dir=ROOT / os.getenv("CHROME_PROFILE_DIR", "./data/chrome-profile"),
             headless=os.getenv("HEADLESS", "false").lower() == "true",
             max_drafts_per_run=int(os.getenv("MAX_DRAFTS_PER_RUN", "8")),
-            min_delay_seconds=float(os.getenv("MIN_DELAY_SECONDS", "3")),
-            max_delay_seconds=float(os.getenv("MAX_DELAY_SECONDS", "9")),
+            min_delay_seconds=float(os.getenv("MIN_DELAY_SECONDS", "0.5")),
+            max_delay_seconds=float(os.getenv("MAX_DELAY_SECONDS", "1.5")),
             database_path=ROOT / os.getenv("DATABASE_PATH", "./data/workana.db"),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
             log_file=ROOT / os.getenv("LOG_FILE", "./data/logs/run.log"),
+            fill_delivery_time=os.getenv("FILL_DELIVERY_TIME", "false").lower() == "true",
         )
 
 

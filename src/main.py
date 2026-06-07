@@ -50,6 +50,7 @@ def scrape() -> None:
                 if page_num == 1
                 else f"{settings.workana_jobs_url}{sep}page={page_num}"
             )
+            logger.info("→ Página {}", page_num)
             page.goto(page_url, wait_until="domcontentloaded")
             cards = jobs_list.scrape_page(page)
             if not cards:
@@ -106,7 +107,10 @@ def scrape() -> None:
             page_num += 1
 
     tracker.close()
-    logger.info("Fim. Drafts pendentes para revisão: rode `python approve.py`")
+    logger.info(
+        "Fim — {} drafts gerados nesta run. Rode `python approve.py` pra revisar.",
+        drafted,
+    )
 
 
 @cli.command()
