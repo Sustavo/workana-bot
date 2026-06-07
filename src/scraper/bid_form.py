@@ -32,13 +32,60 @@ def read_min_amount(page: Page) -> float | None:
         return None
 
 
+def is_hourly_form(page: Page) -> bool:
+    """Detecta 'Valor total por hora' (projeto por hora) no label perto de #Amount."""
+    try:
+        for lbl in page.query_selector_all("label.wk-bullet"):
+            text = (lbl.inner_text() or "").lower()
+            if "por hora" in text:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def ensure_skill_selected(page: Page, fallback_skill: str) -> bool:
+    """Workana pré-seleciona até 3 skills. Se nada selecionado, pesquisa e adiciona uma."""
+    selected = page.query_selector_all("label.skill.like-chip.selected, label.skill.selected")
+    if selected:
+        logger.debug("{} skills já selecionadas — ok", len(selected))
+        return True
+
+    search = page.query_selector("input.multi-select-search-field, input[placeholder*='Pesquisar habilidade']")
+    if not search:
+        logger.warning("Campo 'Pesquisar habilidade' não encontrado — pulando skill fallback")
+        return False
+
+    try:
+        search.click()
+        short_jitter()
+        search.fill(fallback_skill)
+        page.wait_for_timeout(800)
+        suggestion = page.query_selector(
+            ".multi-select-options li:first-child, .multi-select-search-results li:first-child, ul.suggestions li:first-child"
+        )
+        if suggestion:
+            suggestion.click()
+        else:
+            page.keyboard.press("Enter")
+        short_jitter()
+        logger.info("Skill fallback '{}' adicionada", fallback_skill)
+        return True
+    except Exception as e:
+        logger.warning("Falha adicionando skill fallback '{}': {}", fallback_skill, e)
+        return False
+
+
 def fill_form(page: Page, payload: BidPayload) -> None:
     page.fill("textarea#BidContent", payload.content)
     short_jitter()
     page.fill("input#Amount", str(payload.amount))
     short_jitter()
-    page.fill("input#BidDeliveryTime", payload.delivery_time)
-    short_jitter()
+    try:
+        page.fill("input#BidDeliveryTime", payload.delivery_time)
+        short_jitter()
+    except Exception:
+        logger.debug("Campo BidDeliveryTime ausente (provável form por hora)")
     if payload.hours is not None:
         hours_el = page.query_selector("input#Hours")
         if hours_el and hours_el.is_visible():

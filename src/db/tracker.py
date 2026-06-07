@@ -30,7 +30,10 @@ class Tracker:
             VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(slug) DO UPDATE SET
                 last_seen_at = excluded.last_seen_at,
-                state = excluded.state
+                state = CASE
+                    WHEN jobs_seen.state IN ('drafted','sent') THEN jobs_seen.state
+                    ELSE excluded.state
+                END
             """,
             (slug, title, url, now, now, state),
         )

@@ -47,6 +47,8 @@ def main() -> int:
     tracker = Tracker(settings.database_path)
     profile = load_profile()
     portfolio_ids = [str(x) for x in (profile.get("featured_portfolio_ids") or [])]
+    fallback_skill = (profile.get("skills") or ["Programação"])[0]
+    max_hourly_rate = float(profile.get("max_hourly_rate_brl", 150))
 
     drafts = tracker.list_pending_drafts()
     if not drafts:
@@ -99,6 +101,13 @@ def main() -> int:
                 human_sleep(settings)
                 min_amt = bid_form.read_min_amount(page) or 0
                 amount = max(prop["amount_brl"], min_amt)
+                if bid_form.is_hourly_form(page):
+                    if amount > max_hourly_rate:
+                        logger.warning(
+                            "[{}] Form é por hora — capando R$ {:.2f} → R$ {:.2f}/h",
+                            slug, amount, max_hourly_rate,
+                        )
+                        amount = max(max_hourly_rate, min_amt)
                 bid_form.fill_form(
                     page,
                     bid_form.BidPayload(
@@ -109,10 +118,13 @@ def main() -> int:
                         featured_portfolio_ids=portfolio_ids,
                     ),
                 )
+                bid_form.ensure_skill_selected(page, fallback_skill)
                 bid_form.select_portfolio(page, portfolio_ids)
                 bid_form.submit(page)
                 tracker.mark_draft(slug, "sent")
                 tracker.record_submission(slug, amount, prop["delivery_time"], prop["content"])
+                job_url = payload.get("job", {}).get("url") or payload.get("card", {}).get("url") or ""
+                tracker.upsert_job(slug, payload.get("job", {}).get("title", ""), job_url, "sent")
                 logger.success("Enviado: {}", slug)
                 human_sleep(settings)
             except Exception as e:
