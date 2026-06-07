@@ -27,10 +27,10 @@ languages: [pt, en]
 
 # O que você NÃO faz — a IA vai filtrar e o matcher vai vetar.
 do_not_take:
-  - WordPress
-  - PHP legado
-  - Projetos de "urgência" sem contexto
-  - Estágio / vagas CLT
+  # - WordPress
+  # - PHP legado
+  # - Projetos de "urgência" sem contexto
+  # - Estágio / vagas CLT
 
 # Links de portfólio (entram na proposta quando relevante).
 portfolio_links:
@@ -48,6 +48,13 @@ featured_portfolio_ids: []
 # Faixa de valor/hora em BRL (referência pro Gemini calcular preço justo).
 hourly_rate_brl_min: 5
 hourly_rate_brl_max: 5000
+
+# Desconto aplicado sobre a média dos concorrentes (0.15 = 15% abaixo).
+bid_discount_pct: 0.10
+
+# Teto absoluto pro valor do bid em BRL — rede de segurança caso a média
+# dos concorrentes não esteja disponível e o Gemini chute alto.
+max_bid_brl: 40000
 
 # Bio curta que você usaria como abertura genérica (a IA pode adaptar).
 bio: |

@@ -110,7 +110,6 @@ def main() -> int:
                     ),
                 )
                 bid_form.select_portfolio(page, portfolio_ids)
-                Prompt.ask(f"[{slug}] Formulário preenchido. Confirme visualmente e ENTER pra enviar", default="ok")
                 bid_form.submit(page)
                 tracker.mark_draft(slug, "sent")
                 tracker.record_submission(slug, amount, prop["delivery_time"], prop["content"])

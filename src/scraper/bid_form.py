@@ -92,22 +92,39 @@ def select_portfolio(page: Page, ids: list[str]) -> bool:
 
 
 def submit(page: Page) -> None:
-    """Clica em 'Continuar' e confirma no modal."""
-    page.click("form#bidForm button.btn-primary:has-text('Continuar')")
-    # Modal de confirmação aparece
-    page.wait_for_selector(".modal.in, .modal.show", timeout=10_000)
-    short_jitter()
-    # Confirma — geralmente 'Enviar' ou 'Confirmar' dentro do modal
-    confirm_selectors = [
-        ".modal button:has-text('Enviar')",
-        ".modal button:has-text('Confirmar')",
-        ".modal .btn-primary",
+    """Clica em 'Enviar orçamento' e espera o redirect (sai da página /bid/)."""
+    candidates = [
+        "form#bidForm input[type='submit'][value='Enviar orçamento']",
+        "form#bidForm input[type='submit'].btn-primary",
+        "form#bidForm button[type='submit']",
+        ".wk-submit-block input[type='submit']",
     ]
-    for sel in confirm_selectors:
-        btn = page.query_selector(sel)
-        if btn and btn.is_enabled():
-            btn.click()
-            logger.info("Proposta enviada (confirm sel='{}')", sel)
-            break
-    # Após envio, Workana redireciona pra inbox
-    page.wait_for_url("**/inbox/**", timeout=15_000)
+    clicked = False
+    for sel in candidates:
+        try:
+            el = page.query_selector(sel)
+            if el and el.is_visible() and el.is_enabled():
+                el.scroll_into_view_if_needed(timeout=3_000)
+                short_jitter()
+                el.click()
+                logger.info("Clicou em Enviar orçamento (sel='{}')", sel)
+                clicked = True
+                break
+        except PWTimeout:
+            continue
+    if not clicked:
+        raise RuntimeError(
+            "Nenhum botão 'Enviar orçamento' clicável encontrado no form. "
+            "Verifique se o form mudou."
+        )
+
+    url_before = page.url
+    try:
+        page.wait_for_function(
+            "url => location.href !== url",
+            arg=url_before,
+            timeout=20_000,
+        )
+        logger.info("Redirecionado pra {}", page.url)
+    except PWTimeout:
+        logger.warning("Sem redirect após click em 'Enviar orçamento' — verifique manualmente")

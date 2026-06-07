@@ -40,53 +40,70 @@ def scrape() -> None:
                 logger.warning("Falha lendo conexões: {}", e)
             human_sleep(settings)
 
-        page.goto(settings.workana_jobs_url, wait_until="domcontentloaded")
-        cards = jobs_list.scrape_page(page)
-
         drafted = 0
-        for card in cards:
-            if drafted >= settings.max_drafts_per_run:
-                logger.info("Limite de drafts ({}) atingido", settings.max_drafts_per_run)
+        page_num = 1
+        stop = False
+        while not stop:
+            sep = "&" if "?" in settings.workana_jobs_url else "?"
+            page_url = (
+                settings.workana_jobs_url
+                if page_num == 1
+                else f"{settings.workana_jobs_url}{sep}page={page_num}"
+            )
+            page.goto(page_url, wait_until="domcontentloaded")
+            cards = jobs_list.scrape_page(page)
+            if not cards:
+                logger.info("Página {} sem cards — fim do feed", page_num)
                 break
-            state = "open" if card.has_open_bid else "already_bid"
-            tracker.upsert_job(card.slug, card.title, card.url, state)
-            if not card.has_open_bid:
-                logger.info("Pulando {} ({})", card.slug, card.action_text)
-                continue
-            ok, reason = passes(card, filters, profile_data)
-            if not ok:
-                tracker.upsert_job(card.slug, card.title, card.url, "skipped")
-                logger.info("Filtrado: {} → {}", card.slug, reason)
-                continue
-            if tracker.job_state(card.slug) in {"drafted", "sent"}:
-                logger.info("Já tem draft/envio pra {}", card.slug)
-                continue
 
-            try:
-                detail = job_detail.scrape(page, card.url)
-                human_sleep(settings)
-                insight = job_insight.scrape(page, card.slug)
-                human_sleep(settings)
-                gen = generate(settings, asdict(detail), asdict(insight))
-            except Exception as e:
-                logger.exception("Erro coletando/gerando pra {}: {}", card.slug, e)
-                continue
+            for card in cards:
+                if drafted >= settings.max_drafts_per_run:
+                    logger.info("Limite de drafts ({}) atingido", settings.max_drafts_per_run)
+                    stop = True
+                    break
+                state = "open" if card.has_open_bid else "already_bid"
+                tracker.upsert_job(card.slug, card.title, card.url, state)
+                if not card.has_open_bid:
+                    logger.info("Pulando {} ({})", card.slug, card.action_text)
+                    continue
+                ok, reason = passes(card, filters, profile_data)
+                if not ok:
+                    tracker.upsert_job(card.slug, card.title, card.url, "skipped")
+                    logger.info("Filtrado: {} → {}", card.slug, reason)
+                    continue
+                if tracker.job_state(card.slug) in {"drafted", "sent"}:
+                    logger.info("Já tem draft/envio pra {}", card.slug)
+                    continue
 
-            payload = {
-                "job": asdict(detail),
-                "insight": asdict(insight),
-                "proposal": {
-                    "content": gen.content,
-                    "amount_brl": gen.amount_brl,
-                    "delivery_time": gen.delivery_time,
-                    "hours_estimate": gen.hours_estimate,
-                },
-                "card": asdict(card),
-            }
-            tracker.save_draft(card.slug, payload)
-            tracker.upsert_job(card.slug, card.title, card.url, "drafted")
-            drafted += 1
-            logger.success("Draft gerado: {} (R$ {:.2f}, {})", card.slug, gen.amount_brl, gen.delivery_time)
+                try:
+                    detail = job_detail.scrape(page, card.url)
+                    human_sleep(settings)
+                    insight = job_insight.scrape(page, card.slug)
+                    human_sleep(settings)
+                    gen = generate(settings, asdict(detail), asdict(insight))
+                except Exception as e:
+                    logger.exception("Erro coletando/gerando pra {}: {}", card.slug, e)
+                    continue
+
+                payload = {
+                    "job": asdict(detail),
+                    "insight": asdict(insight),
+                    "proposal": {
+                        "content": gen.content,
+                        "amount_brl": gen.amount_brl,
+                        "delivery_time": gen.delivery_time,
+                        "hours_estimate": gen.hours_estimate,
+                    },
+                    "card": asdict(card),
+                }
+                tracker.save_draft(card.slug, payload)
+                tracker.upsert_job(card.slug, card.title, card.url, "drafted")
+                drafted += 1
+                logger.success("Draft gerado: {} (R$ {:.2f}, {})", card.slug, gen.amount_brl, gen.delivery_time)
+
+            if stop:
+                break
+            page_num += 1
 
     tracker.close()
     logger.info("Fim. Drafts pendentes para revisão: rode `python approve.py`")
