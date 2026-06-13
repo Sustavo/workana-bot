@@ -2,11 +2,14 @@ import json
 import re
 from dataclasses import dataclass
 
-import google.generativeai as genai
+from google import genai
+from google.genai import errors as genai_errors
+from google.genai import types
 from loguru import logger
 
 from src.ai.prompts import SYSTEM_INSTRUCTION, build_user_prompt
 from src.utils.config import Settings, load_examples, load_profile
+from src.utils.errors import GeminiFatalError
 
 
 @dataclass
@@ -18,6 +21,32 @@ class GeneratedProposal:
 
 
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+# Códigos HTTP de ClientError que NÃO adianta continuar (auth/quota) → abortar.
+_FATAL_CLIENT_CODES = {401, 403, 429}
+_FATAL_STR_MARKERS = (
+    "resource_exhausted", "resourceexhausted", "429", "quota", "permission_denied",
+    "permissiondenied", "unauthenticated", "api key", "api_key", "503",
+    "service_unavailable", "serviceunavailable", "rate limit", "exceeded",
+)
+
+
+def _is_fatal_genai_error(e: Exception) -> bool:
+    """True quando não adianta continuar (quota/auth/serviço fora) → abortar a run.
+    Erros 4xx de request malformado (ex.: 400) são por-vaga (retornam False)."""
+    # 5xx do servidor (503 ServiceUnavailable, 500 etc.) → fatal
+    if isinstance(e, genai_errors.ServerError):
+        return True
+    # 4xx: só auth/quota são fatais
+    if isinstance(e, genai_errors.ClientError):
+        code = getattr(e, "code", None)
+        if code in _FATAL_CLIENT_CODES:
+            return True
+        s = f"{getattr(e, 'message', '')} {e}".lower()
+        return any(k in s for k in _FATAL_STR_MARKERS)
+    # fallback por string (erros de transporte/timeout, mudanças de versão)
+    s = f"{type(e).__name__}: {e}".lower()
+    return any(k in s for k in _FATAL_STR_MARKERS)
 
 
 def _profile_block(profile: dict) -> str:
@@ -38,24 +67,36 @@ def _build_system(profile: dict, examples: str) -> str:
 
 
 def generate(settings: Settings, job: dict, insight: dict | None) -> GeneratedProposal:
-    genai.configure(api_key=settings.google_api_key)
     profile = load_profile()
     examples = load_examples()
     system = _build_system(profile, examples)
     discount = float(profile.get("bid_discount_pct", 0.10))
 
-    model = genai.GenerativeModel(
-        model_name=settings.gemini_model,
-        system_instruction=system,
-        generation_config={
-            "response_mime_type": "application/json",
-            "temperature": 0.6,
-        },
-    )
+    client = genai.Client(api_key=settings.google_api_key)
     user_prompt = build_user_prompt(job, insight, discount)
     logger.debug("Prompt user ({} chars): {}", len(user_prompt), user_prompt[:200])
-    resp = model.generate_content(user_prompt)
-    raw = resp.text or ""
+
+    try:
+        resp = client.models.generate_content(
+            model=settings.gemini_model,
+            contents=user_prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=system,
+                temperature=0.6,
+                response_mime_type="application/json",
+            ),
+        )
+    except Exception as e:
+        if _is_fatal_genai_error(e):
+            raise GeminiFatalError(
+                f"Erro fatal da API Gemini ({type(e).__name__}): {e}"
+            ) from e
+        raise  # demais erros: tratados como por-vaga no caller
+
+    raw = (getattr(resp, "text", None) or "")
+    if not raw.strip():
+        # resposta vazia/bloqueada por safety → por-vaga (pula), não é fatal
+        raise ValueError("Gemini retornou resposta vazia (possível bloqueio de safety)")
     match = _JSON_RE.search(raw)
     data = json.loads(match.group(0) if match else raw)
 
