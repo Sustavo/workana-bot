@@ -7,13 +7,16 @@ from loguru import logger
 from playwright.sync_api import Page, TimeoutError as PWTimeout
 
 from src.utils.delays import short_jitter
-from src.utils.errors import SubmitVerificationError
+from src.utils.errors import BidUnavailableError, SubmitVerificationError
 from src.utils.number import parse_money
 
 _MIN_BID_RE = re.compile(
     r"(?:lance|valor|or[çc]amento)\s*m[íi]nimo[^R$\d]{0,30}(?:R\$|BRL)?\s*([\d\.\,]+)",
     re.IGNORECASE,
 )
+
+# Marcador estruturado da página "Acesso Negado" do Workana (sem form#bidForm).
+_ACCESS_DENIED_SEL = "section.error-section, h2.error-title"
 
 
 @dataclass
@@ -26,9 +29,32 @@ class BidPayload:
 
 
 def open_bid_page(page: Page, job_slug: str) -> None:
+    """Abre a página do bid. Se cair em 'Acesso Negado' (vaga sem permissão de lance),
+    levanta BidUnavailableError pro caller PULAR a vaga em vez de travar 15s."""
     url = f"https://www.workana.com/messages/bid/{job_slug}"
     page.goto(url, wait_until="domcontentloaded")
-    page.wait_for_selector("form#bidForm", timeout=15_000)
+    try:
+        # corrida: ou o form aparece, ou a página de erro ("Acesso Negado")
+        page.wait_for_selector(
+            f"form#bidForm, {_ACCESS_DENIED_SEL}", timeout=15_000, state="attached"
+        )
+    except PWTimeout:
+        raise BidUnavailableError(
+            "Nem form#bidForm nem página de erro apareceram (timeout).", url=url
+        )
+
+    has_form = page.query_selector("form#bidForm") is not None
+    denied = page.query_selector(_ACCESS_DENIED_SEL)
+    if not has_form:
+        title = ""
+        el = page.query_selector("h2.error-title")
+        if el:
+            title = (el.inner_text() or "").strip()
+        if denied or title:
+            raise BidUnavailableError(f"Acesso Negado: {title or 'sem autorização'}", url=url)
+        raise BidUnavailableError("form#bidForm ausente sem página de erro reconhecida.", url=url)
+
+    page.wait_for_selector("form#bidForm", timeout=2_000, state="visible")
 
 
 def _fmt_amount(amount: float) -> str:
@@ -37,6 +63,30 @@ def _fmt_amount(amount: float) -> str:
     if float(amount) == int(amount):
         return str(int(amount))
     return f"{amount:.2f}"
+
+
+def _set_amount_vue(page: Page, amount: float) -> None:
+    """Seta #Amount de forma 'amigável ao Vue': preenche e dispara input+change+blur
+    pra forçar o v-model (currentAmount) a sincronizar. Sem isso, o Vue reescreve o
+    campo num evento posterior (ex.: vira 2600 ou esvazia)."""
+    val = _fmt_amount(amount)
+    page.fill("input#Amount", val)
+    page.eval_on_selector(
+        "input#Amount",
+        """(el, v) => {
+            el.value = v;
+            el.dispatchEvent(new Event('input',  { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            el.dispatchEvent(new Event('blur',   { bubbles: true }));
+        }""",
+        val,
+    )
+
+
+def _read_amount_value(page: Page) -> float | None:
+    """Lê o valor atual do #Amount como número (ou None)."""
+    v = read_amount_validity(page)
+    return parse_money(v.get("value")) if v else None
 
 
 def read_min_amount(page: Page) -> float | None:
@@ -200,10 +250,15 @@ def ensure_skill_selected(page: Page, fallback_skill: str) -> bool:
 
 
 def fill_form(page: Page, payload: BidPayload, fill_delivery_time: bool = False) -> None:
+    # Ordem importa: o #Amount é preenchido por ÚLTIMO. O form é Vue e preencher
+    # #Hours depois do #Amount fazia o Vue reescrever o valor (virava 2600/esvaziava).
     page.fill("textarea#BidContent", payload.content)
     short_jitter()
-    page.fill("input#Amount", _fmt_amount(payload.amount))
-    short_jitter()
+    if payload.hours is not None:
+        hours_el = page.query_selector("input#Hours")
+        if hours_el and hours_el.is_visible():
+            page.fill("input#Hours", _fmt_amount(payload.hours))
+            short_jitter()
     if fill_delivery_time:
         try:
             page.fill("input#BidDeliveryTime", payload.delivery_time)
@@ -212,11 +267,9 @@ def fill_form(page: Page, payload: BidPayload, fill_delivery_time: bool = False)
             logger.debug("Campo BidDeliveryTime ausente (provável form por hora)")
     else:
         logger.debug("Pulando preenchimento de 'Prazo de entrega' (FILL_DELIVERY_TIME=false)")
-    if payload.hours is not None:
-        hours_el = page.query_selector("input#Hours")
-        if hours_el and hours_el.is_visible():
-            page.fill("input#Hours", _fmt_amount(payload.hours))
-            short_jitter()
+    # valor por último + dispatch de eventos pro Vue não reescrever
+    _set_amount_vue(page, payload.amount)
+    short_jitter()
 
 
 def select_portfolio(page: Page, ids: list[str]) -> bool:
@@ -285,6 +338,28 @@ def _click_submit_button(page: Page) -> bool:
     return False
 
 
+def _click_confirm_modal(page: Page, timeout_ms: int = 4_000) -> bool:
+    """Se aparecer o modal de confirmação ('Atenção! … Continuar'), clica Continuar.
+    Best-effort: forms sem modal seguem direto. O modal é pré-renderizado mas escondido
+    (display:none no ancestral) — por isso exigimos state='visible' (e o texto 'Continuar'
+    é único entre os vários modais do form). Retorna True se clicou."""
+    try:
+        btn = page.wait_for_selector(
+            ".modal-footer button.btn-primary:has-text('Continuar')",
+            timeout=timeout_ms, state="visible",
+        )
+    except PWTimeout:
+        return False
+    try:
+        short_jitter()
+        btn.click()
+        logger.info("Modal de confirmação: cliquei em 'Continuar'")
+        return True
+    except Exception as e:
+        logger.warning("Falha clicando 'Continuar' no modal: {}", e)
+        return False
+
+
 def _has_success_toast(page: Page) -> bool:
     selectors = [
         ".toast-success",
@@ -327,14 +402,35 @@ def _raise_if_form_error(page: Page) -> None:
             continue
 
 
-def submit(page: Page, redirect_timeout_ms: int = 25_000) -> None:
+def submit(page: Page, expected_amount: float | None = None, redirect_timeout_ms: int = 25_000) -> None:
     """Clica em 'Enviar orçamento' e CONFIRMA o envio.
 
     Contrato: retorna None em sucesso confirmado; levanta SubmitVerificationError
     em qualquer caso não confirmado (valor abaixo do mínimo, sem redirect, erro de
-    validação, botão ausente). Assim o caller NUNCA marca como 'sent' um envio
-    que na verdade bugou — causa-raiz do "valor errado / passou e bugou".
+    validação, botão ausente, ou valor que o Vue derivou). Assim o caller NUNCA marca
+    como 'sent' um envio que na verdade bugou — causa-raiz do "valor errado / passou e bugou".
+
+    expected_amount: se informado, re-afirma o #Amount logo antes do envio (o Vue pode
+    ter reescrito o valor durante skills/portfólio) e ABORTA a vaga se não conseguir fixar.
     """
+    # RE-AFIRMAÇÃO DO VALOR: o Vue pode ter reescrito o #Amount (ex.: vira 2600) depois
+    # do fill_form, durante skills/portfólio. Garante que o valor certo está no campo.
+    if expected_amount is not None:
+        cur = _read_amount_value(page)
+        if cur is None or abs(cur - float(expected_amount)) > 0.5:
+            logger.warning(
+                "#Amount derivou (atual={}, esperado={:.2f}) — re-setando antes do envio.",
+                cur, float(expected_amount),
+            )
+            _set_amount_vue(page, expected_amount)
+            cur2 = _read_amount_value(page)
+            if cur2 is None or abs(cur2 - float(expected_amount)) > 0.5:
+                raise SubmitVerificationError(
+                    f"Não consegui fixar o valor em R$ {float(expected_amount):.2f} "
+                    f"(campo ficou em {cur2}); pulando p/ não enviar valor errado.",
+                    kind="amount_drift",
+                )
+
     # PRÉ-CHECK: validade HTML5 antes de clicar (pega valor abaixo do mínimo)
     v = read_amount_validity(page)
     if v is not None:
@@ -356,6 +452,9 @@ def submit(page: Page, redirect_timeout_ms: int = 25_000) -> None:
             "Nenhum botão 'Enviar orçamento' clicável encontrado no form.",
             kind="no_button",
         )
+
+    # Modal de confirmação ('Atenção! … Continuar'), quando aparece (ex.: projeto por hora).
+    _click_confirm_modal(page)
 
     # PÓS-CHECK: confirmar de verdade
     url_before = page.url

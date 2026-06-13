@@ -17,7 +17,7 @@ from src.scraper import bid_form
 from src.ui.dashboard import Dashboard, DashState
 from src.utils.config import Settings, load_profile
 from src.utils.delays import human_sleep
-from src.utils.errors import StopRun, SuspiciousActivityError
+from src.utils.errors import BidUnavailableError, StopRun, SuspiciousActivityError
 from src.utils.logger import setup_logger
 
 
@@ -26,6 +26,10 @@ REPORTS_DIR = Path(__file__).parent / "data" / "reports"
 
 def _classify_error(err: str) -> str:
     low = err.lower()
+    if "não consegui fixar o valor" in low or "nao consegui fixar o valor" in low or "derivou" in low:
+        return "O valor do campo foi reescrito pelo form (Vue) e não deu pra fixar — envio cancelado pra não mandar valor errado."
+    if "acesso negado" in low:
+        return "Vaga sem permissão de lance ('Acesso Negado') — pulada e descartada."
     if "abaixo do mínimo" in low or "abaixo do minimo" in low or ("min" in low and "amount" in low):
         return "Valor abaixo do mínimo exigido pelo Workana — o envio foi bloqueado (NÃO marcado como enviado)."
     if "sem redirect" in low or "não confirmado" in low or "nao confirmado" in low or "/bid/ após submit" in low:
@@ -227,8 +231,14 @@ def main() -> int:
                     )
                     bid_form.ensure_skill_selected(page, fallback_skill)
                     bid_form.select_portfolio(page, portfolio_ids)
-                    # submit() LEVANTA se o envio não for confirmado → só marca 'sent' no sucesso.
-                    bid_form.submit(page, redirect_timeout_ms=settings.submit_redirect_timeout_ms)
+                    # submit() re-afirma o valor (anti-clobber do Vue), trata o modal de
+                    # confirmação e LEVANTA se o envio não for confirmado → só marca 'sent'
+                    # no sucesso.
+                    bid_form.submit(
+                        page,
+                        expected_amount=amount,
+                        redirect_timeout_ms=settings.submit_redirect_timeout_ms,
+                    )
 
                     tracker.mark_draft(slug, "sent")
                     tracker.record_submission(slug, amount, prop["delivery_time"], prop["content"])
@@ -239,6 +249,13 @@ def main() -> int:
                     dash.mark_sent(slug, amount, min_amt)
                     human_sleep(settings)
 
+                except BidUnavailableError as e:
+                    # "Acesso Negado" (vaga sem permissão de lance) → pula e DESCARTA o rascunho.
+                    logger.info("[{}] acesso negado — pulado e descartado: {}", slug, e)
+                    tracker.mark_draft(slug, "rejected")
+                    dash.mark_skipped(slug, "acesso negado")
+                    human_sleep(settings)
+                    continue
                 except StopRun as e:
                     # Suspeita no Workana → pausa pra intervenção; resolvido = segue p/ próximo.
                     if isinstance(e, SuspiciousActivityError):

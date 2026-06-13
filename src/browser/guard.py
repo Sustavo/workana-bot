@@ -14,14 +14,16 @@ from playwright.sync_api import Page, Response
 from src.utils.errors import SuspiciousActivityError
 
 # Textos que aparecem em páginas de challenge/bloqueio.
+# OBS: "acesso negado"/"access denied" foram tirados daqui de propósito — o Workana
+# usa "Acesso Negado" numa página NORMAL (HTTP 200) quando você não pode dar lance
+# numa vaga específica; isso é tratado como "pular a vaga" (BidUnavailableError),
+# não como ban. Bans reais são pegos por HTTP 403/429/503 + iframes/títulos abaixo.
 _BLOCK_TEXT_MARKERS = (
     "verifying you are human",
     "verify you are human",
     "atividade suspeita",
     "unusual activity",
     "unusual traffic",
-    "acesso negado",
-    "access denied",
     "you have been blocked",
     "checking your browser before accessing",
     "too many requests",

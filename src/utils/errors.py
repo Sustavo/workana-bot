@@ -44,7 +44,8 @@ class PauseAndResume(Exception):
 class SubmitVerificationError(Exception):
     """submit() não conseguiu CONFIRMAR o envio do orçamento.
 
-    kind ∈ {'below_min','no_redirect','validation','no_button','unknown'}.
+    kind ∈ {'below_min','no_redirect','validation','no_button','amount_drift','unknown'}.
+    'amount_drift' = o valor do campo derivou (o Vue reescreveu) e não deu pra fixar.
     NÃO é StopRun: o caller trata como falha por-vaga (não marca 'sent').
     """
 
@@ -52,3 +53,15 @@ class SubmitVerificationError(Exception):
         self.reason = reason
         self.kind = kind
         super().__init__(reason)
+
+
+class BidUnavailableError(Exception):
+    """A página do bid não está disponível p/ esta vaga (ex.: 'Acesso Negado' —
+    sem form#bidForm). NÃO é StopRun nem falha de envio: o caller deve PULAR a
+    vaga (e, por decisão do usuário, descartar o rascunho) e seguir pra próxima.
+    """
+
+    def __init__(self, reason: str, url: str = "") -> None:
+        self.reason = reason
+        self.url = url
+        super().__init__(f"{reason} (url={url})" if url else reason)
