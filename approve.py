@@ -11,11 +11,13 @@ from rich.panel import Panel
 from rich.prompt import Prompt
 from rich.table import Table
 
-from src.browser.session import ensure_logged_in, open_context
+from src.browser import guard, session
 from src.db.tracker import Tracker
 from src.scraper import bid_form
+from src.ui.dashboard import Dashboard, DashState
 from src.utils.config import Settings, load_profile
 from src.utils.delays import human_sleep
+from src.utils.errors import StopRun, SuspiciousActivityError
 from src.utils.logger import setup_logger
 
 
@@ -24,10 +26,16 @@ REPORTS_DIR = Path(__file__).parent / "data" / "reports"
 
 def _classify_error(err: str) -> str:
     low = err.lower()
-    if "enviar orçamento" in low or ("timeout" in low and "submit" in low):
-        return "Botão 'Enviar orçamento' não apareceu/clicável — form pode ter mudado ou valor abaixo do mínimo aceito."
-    if "min" in low and "amount" in low:
-        return "Valor abaixo do mínimo exigido pelo Workana."
+    if "abaixo do mínimo" in low or "abaixo do minimo" in low or ("min" in low and "amount" in low):
+        return "Valor abaixo do mínimo exigido pelo Workana — o envio foi bloqueado (NÃO marcado como enviado)."
+    if "sem redirect" in low or "não confirmado" in low or "nao confirmado" in low or "/bid/ após submit" in low:
+        return "Envio NÃO confirmado (sem redirect/sucesso) — possível erro de validação ou página lenta."
+    if "form rejeitou" in low:
+        return "O Workana rejeitou o formulário (mensagem de validação visível)."
+    if "nenhum botão" in low or "enviar orçamento" in low:
+        return "Botão 'Enviar orçamento' não apareceu/clicável — form pode ter mudado."
+    if "atividade suspeita" in low or "captcha" in low or "bloqueio" in low:
+        return "Atividade suspeita/bloqueio do Workana — automação pausada/abortada pra evitar ban."
     if "ensure_logged_in" in low or "anônima" in low or "login" in low:
         return "Sessão deslogada — refaça o login no browser."
     if "wait_for_selector" in low or "wait_for_url" in low or "timeout" in low:
@@ -90,9 +98,19 @@ def _print_draft(console: Console, slug: str, payload: dict, idx: int, total: in
     console.print(Panel(prop["content"], title="[yellow]Texto", border_style="yellow"))
 
 
+def _parse_speed_arg(argv: list[str]) -> str | None:
+    if "--speed" in argv:
+        i = argv.index("--speed")
+        if i + 1 < len(argv):
+            return argv[i + 1]
+    return None
+
+
 def main() -> int:
-    settings = Settings.load()
+    speed = _parse_speed_arg(sys.argv[1:])
+    settings = Settings.load(speed_override=speed)
     setup_logger(settings)
+    logger.info("Velocidade: {}", settings.speed_summary())
     tracker = Tracker(settings.database_path)
     profile = load_profile()
     portfolio_ids = [str(x) for x in (profile.get("featured_portfolio_ids") or [])]
@@ -157,52 +175,94 @@ def main() -> int:
 
     sent_n = 0
     failed: list[tuple[str, dict, str]] = []
-    with open_context(settings) as ctx:
-        ensure_logged_in(ctx, settings.workana_jobs_url)
+    aborted: str | None = None
+
+    # Abre o browser e loga ANTES do dashboard (ensure_logged_in pode pedir input).
+    with session.open_context(settings) as ctx:
+        session.ensure_logged_in(ctx, settings.workana_jobs_url)
         page = ctx.pages[0]
-        for slug, payload in approved:
-            prop = payload["proposal"]
-            try:
-                bid_form.open_bid_page(page, slug)
-                human_sleep(settings)
-                min_amt = bid_form.read_min_amount(page) or 0
-                amount = max(prop["amount_brl"], min_amt)
-                if bid_form.is_hourly_form(page):
-                    if amount > max_hourly_rate:
-                        logger.warning(
-                            "[{}] Form é por hora — capando R$ {:.2f} → R$ {:.2f}/h",
-                            slug, amount, max_hourly_rate,
-                        )
-                        amount = max(max_hourly_rate, min_amt)
-                bid_form.fill_form(
-                    page,
-                    bid_form.BidPayload(
-                        amount=amount,
-                        delivery_time=prop["delivery_time"],
-                        hours=prop.get("hours_estimate"),
-                        content=prop["content"],
-                        featured_portfolio_ids=portfolio_ids,
-                    ),
-                    fill_delivery_time=settings.fill_delivery_time,
-                )
-                bid_form.ensure_skill_selected(page, fallback_skill)
-                bid_form.select_portfolio(page, portfolio_ids)
-                bid_form.submit(page)
-                tracker.mark_draft(slug, "sent")
-                tracker.record_submission(slug, amount, prop["delivery_time"], prop["content"])
-                job_url = payload.get("job", {}).get("url") or payload.get("card", {}).get("url") or ""
-                tracker.upsert_job(slug, payload.get("job", {}).get("title", ""), job_url, "sent")
-                logger.success("Enviado: {}", slug)
-                sent_n += 1
-                human_sleep(settings)
-            except Exception as e:
-                logger.exception("Falha enviando {}: {}", slug, e)
-                failed.append((slug, payload, str(e)))
+
+        state = DashState(phase="submit", speed_profile=settings.speed_profile, total=len(approved))
+        with Dashboard(state, settings, enabled=not settings.headless) as dash:
+            for slug, payload in approved:
+                prop = payload["proposal"]
+                job = payload.get("job", {})
+                insight_avg = (payload.get("insight") or {}).get("avg_bid_value")
+
+                if aborted:
+                    failed.append((slug, payload, f"não enviado — run abortada: {aborted}"))
+                    dash.mark_failed(slug, "abortada")
+                    continue
+
+                dash.start_job(slug, job.get("title", ""))
+                if insight_avg is not None:
+                    dash.update(competitor_avg=insight_avg)
+
+                try:
+                    bid_form.open_bid_page(page, slug)
+                    if settings.guard_enabled:
+                        guard.assert_safe(page, "bid_page")
+                    human_sleep(settings)
+
+                    # Valor: nunca abaixo do mínimo real do Workana (corrige o "valor errado").
+                    amount, min_amt = bid_form.clamp_amount(page, prop["amount_brl"])
+                    if bid_form.is_hourly_form(page):
+                        if amount > max_hourly_rate:
+                            logger.warning(
+                                "[{}] Form é por hora — capando R$ {:.2f} → R$ {:.2f}/h",
+                                slug, amount, max_hourly_rate,
+                            )
+                            amount = max(max_hourly_rate, min_amt)  # nunca abaixo do mínimo
+
+                    bid_form.fill_form(
+                        page,
+                        bid_form.BidPayload(
+                            amount=amount,
+                            delivery_time=prop["delivery_time"],
+                            hours=prop.get("hours_estimate"),
+                            content=prop["content"],
+                            featured_portfolio_ids=portfolio_ids,
+                        ),
+                        fill_delivery_time=settings.fill_delivery_time,
+                    )
+                    bid_form.ensure_skill_selected(page, fallback_skill)
+                    bid_form.select_portfolio(page, portfolio_ids)
+                    # submit() LEVANTA se o envio não for confirmado → só marca 'sent' no sucesso.
+                    bid_form.submit(page, redirect_timeout_ms=settings.submit_redirect_timeout_ms)
+
+                    tracker.mark_draft(slug, "sent")
+                    tracker.record_submission(slug, amount, prop["delivery_time"], prop["content"])
+                    job_url = job.get("url") or payload.get("card", {}).get("url") or ""
+                    tracker.upsert_job(slug, job.get("title", ""), job_url, "sent")
+                    logger.success("Enviado: {} (R$ {:.2f})", slug, amount)
+                    sent_n += 1
+                    dash.mark_sent(slug, amount, min_amt)
+                    human_sleep(settings)
+
+                except StopRun as e:
+                    # Suspeita no Workana → pausa pra intervenção; resolvido = segue p/ próximo.
+                    if isinstance(e, SuspiciousActivityError):
+                        with dash.paused():
+                            resolved = session.handle_suspicious(page, settings, e)
+                        if resolved:
+                            failed.append((slug, payload, f"interrompido por suspeita (resolvido, não enviado): {e}"))
+                            dash.mark_failed(slug, "suspeita (resolvida)")
+                            continue
+                    aborted = str(e)
+                    failed.append((slug, payload, str(e)))
+                    dash.mark_failed(slug, str(e)[:50])
+                except Exception as e:
+                    # inclui SubmitVerificationError → falha por-vaga, draft continua 'pending'.
+                    logger.exception("Falha enviando {}: {}", slug, e)
+                    failed.append((slug, payload, str(e)))
+                    dash.mark_failed(slug, str(e)[:50])
 
     console.print(
         f"\n[bold]Envio concluído:[/] [green]{sent_n}[/] enviado(s) com sucesso, "
         f"[red]{len(failed)}[/] falhou/falharam (de {len(approved)} aprovado(s))."
     )
+    if aborted:
+        console.print(f"[bold red]Run abortada:[/] {aborted}")
     if failed:
         report = _write_failure_report(failed, len(approved))
         console.print(f"  → Relatório de falhas: [yellow]{report}[/]")
