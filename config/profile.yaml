@@ -54,7 +54,7 @@ bid_discount_pct: 0.10
 
 # Teto absoluto pro valor do bid em BRL — rede de segurança caso a média
 # dos concorrentes não esteja disponível e o Gemini chute alto.
-max_bid_brl: 4000
+max_bid_brl: 20000
 
 # Teto pro valor por hora (R$/h) quando o form for "Valor total por hora".
 max_hourly_rate_brl: 1500

@@ -18,13 +18,14 @@ required_keywords_any: []
 # Categorias permitidas. Vazio = todas as que estiverem no feed URL.
 allowed_categories: []
 
-# Categorias bloqueadas.
+# Categorias bloqueadas (nomes como aparecem no Workana; o match ignora
+# ordem/conector, então "Vendas e Marketing" também casa com "Marketing e Vendas").
 blocked_categories:
   - "Suporte Administrativo"
-  - "Vendas e Marketing"
+  - "Marketing e Vendas"
 
-# Orçamento mínimo em USD. Vagas declaradas abaixo disso são puladas.
-# 0 = sem mínimo.
+# Orçamento mínimo (na moeda exibida pela vaga, normalmente R$). Vagas declaradas
+# abaixo disso são puladas. 0 = sem mínimo.
 min_budget_usd: 0
 
 # Faixa de número de propostas concorrentes que aceitamos.

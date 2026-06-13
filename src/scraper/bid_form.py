@@ -7,6 +7,8 @@ from loguru import logger
 from playwright.sync_api import Page, TimeoutError as PWTimeout
 
 from src.utils.delays import short_jitter
+from src.utils.errors import SubmitVerificationError
+from src.utils.number import parse_money
 
 _MIN_BID_RE = re.compile(
     r"(?:lance|valor|or[çc]amento)\s*m[íi]nimo[^R$\d]{0,30}(?:R\$|BRL)?\s*([\d\.\,]+)",
@@ -29,50 +31,86 @@ def open_bid_page(page: Page, job_slug: str) -> None:
     page.wait_for_selector("form#bidForm", timeout=15_000)
 
 
-def _parse_amount(text: str) -> float | None:
-    """Parseia '7.331,00' (BR), '7331.00' (US), '7.331' (milhar BR), '160' etc."""
-    if not text:
-        return None
-    s = text.strip()
-    has_comma = "," in s
-    if has_comma:
-        s = s.replace(".", "").replace(",", ".")
-    else:
-        if "." in s:
-            tail = s.rsplit(".", 1)[1]
-            if len(tail) == 3:
-                s = s.replace(".", "")
-    try:
-        return float(s)
-    except ValueError:
-        return None
+def _fmt_amount(amount: float) -> str:
+    """Formata o valor pro input#Amount (type=number, formato US/ponto).
+    Inteiro → '1050'; com centavos → '150.50'. Evita mandar '1050.0'."""
+    if float(amount) == int(amount):
+        return str(int(amount))
+    return f"{amount:.2f}"
 
 
 def read_min_amount(page: Page) -> float | None:
-    """Mínimo do bid: maior valor entre input#Amount[min] e texto 'Lance mínimo: R$ X'."""
+    """Mínimo do bid: maior valor entre input#Amount[min] e texto 'Lance mínimo: R$ X'.
+    O atributo `min` é a fonte autoritativa do campo; o texto é cross-check/fallback."""
     candidates: list[float] = []
+    attr_min: float | None = None
 
     el = page.query_selector("input#Amount")
     if el:
         val = el.get_attribute("min")
-        if val:
+        if val in (None, ""):
+            # 2ª tentativa: ler a propriedade live via JS (alguns layouts setam por JS)
             try:
-                candidates.append(float(val))
-            except ValueError:
-                pass
+                val = page.eval_on_selector("input#Amount", "el => el.min")
+            except Exception:
+                val = None
+        if val not in (None, ""):
+            v = parse_money(val)
+            if v is not None:
+                attr_min = v
+                candidates.append(v)
 
+    text_min: float | None = None
     try:
         body = page.inner_text("body", timeout=3000)
         m = _MIN_BID_RE.search(body)
         if m:
-            v = _parse_amount(m.group(1))
-            if v:
+            v = parse_money(m.group(1))
+            if v is not None:
+                text_min = v
                 candidates.append(v)
                 logger.debug("Lance mínimo detectado via texto: R$ {}", v)
     except Exception:
         pass
 
+    if attr_min is not None and text_min is not None and abs(attr_min - text_min) > 0.5:
+        logger.warning(
+            "Mínimo divergente: atributo={} vs texto={} — usando o maior",
+            attr_min, text_min,
+        )
+
     return max(candidates) if candidates else None
+
+
+def read_amount_validity(page: Page) -> dict | None:
+    """Lê o ValidityState nativo do #Amount via JS — a verdade do HTML5.
+    Retorna None se o campo não existir/der erro."""
+    try:
+        return page.eval_on_selector(
+            "input#Amount",
+            """el => ({
+                value: el.value,
+                min: el.min,
+                valid: el.validity.valid,
+                rangeUnderflow: el.validity.rangeUnderflow,
+                valueMissing: el.validity.valueMissing,
+                badInput: el.validity.badInput,
+                stepMismatch: el.validity.stepMismatch
+            })""",
+        )
+    except Exception as e:
+        logger.debug("Não consegui ler validity do #Amount: {}", e)
+        return None
+
+
+def clamp_amount(page: Page, intended: float) -> tuple[float, float]:
+    """Garante que o valor enviado nunca fique abaixo do mínimo real do Workana.
+    Ex.: intended=1000, mínimo=1050 → retorna (1050.0, 1050.0)."""
+    min_amt = read_min_amount(page) or 0.0
+    final = max(float(intended), min_amt)
+    if final != float(intended):
+        logger.info("Valor ajustado p/ o mínimo: R$ {:.2f} → R$ {:.2f}", intended, final)
+    return final, min_amt
 
 
 def is_hourly_form(page: Page) -> bool:
@@ -164,7 +202,7 @@ def ensure_skill_selected(page: Page, fallback_skill: str) -> bool:
 def fill_form(page: Page, payload: BidPayload, fill_delivery_time: bool = False) -> None:
     page.fill("textarea#BidContent", payload.content)
     short_jitter()
-    page.fill("input#Amount", str(payload.amount))
+    page.fill("input#Amount", _fmt_amount(payload.amount))
     short_jitter()
     if fill_delivery_time:
         try:
@@ -177,7 +215,7 @@ def fill_form(page: Page, payload: BidPayload, fill_delivery_time: bool = False)
     if payload.hours is not None:
         hours_el = page.query_selector("input#Hours")
         if hours_el and hours_el.is_visible():
-            page.fill("input#Hours", str(payload.hours))
+            page.fill("input#Hours", _fmt_amount(payload.hours))
             short_jitter()
 
 
@@ -226,15 +264,13 @@ def select_portfolio(page: Page, ids: list[str]) -> bool:
     return picked >= 3
 
 
-def submit(page: Page) -> None:
-    """Clica em 'Enviar orçamento' e espera o redirect (sai da página /bid/)."""
+def _click_submit_button(page: Page) -> bool:
     candidates = [
         "form#bidForm input[type='submit'][value='Enviar orçamento']",
         "form#bidForm input[type='submit'].btn-primary",
         "form#bidForm button[type='submit']",
         ".wk-submit-block input[type='submit']",
     ]
-    clicked = False
     for sel in candidates:
         try:
             el = page.query_selector(sel)
@@ -243,23 +279,113 @@ def submit(page: Page) -> None:
                 short_jitter()
                 el.click()
                 logger.info("Clicou em Enviar orçamento (sel='{}')", sel)
-                clicked = True
-                break
+                return True
         except PWTimeout:
             continue
-    if not clicked:
-        raise RuntimeError(
-            "Nenhum botão 'Enviar orçamento' clicável encontrado no form. "
-            "Verifique se o form mudou."
+    return False
+
+
+def _has_success_toast(page: Page) -> bool:
+    selectors = [
+        ".toast-success",
+        ".alert-success",
+        ".growl-success",
+        "text=/proposta enviada|or[çc]amento enviado|enviado com sucesso/i",
+    ]
+    for sel in selectors:
+        try:
+            el = page.query_selector(sel)
+            if el and el.is_visible():
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _raise_if_form_error(page: Page) -> None:
+    """Se houver mensagem de erro de validação visível no form, levanta typed error."""
+    selectors = [
+        ".help-block.error:visible",
+        ".has-error .help-block:visible",
+        "#bidForm .error:visible",
+        ".field-validation-error:visible",
+        "#bidForm .alert-danger:visible",
+    ]
+    for sel in selectors:
+        try:
+            el = page.query_selector(sel)
+            if el and el.is_visible():
+                msg = (el.inner_text() or "").strip()
+                if not msg:
+                    continue
+                low = msg.lower()
+                kind = "below_min" if ("mínimo" in low or "minimo" in low or "min" in low) else "validation"
+                raise SubmitVerificationError(f"Form rejeitou: {msg}", kind=kind)
+        except SubmitVerificationError:
+            raise
+        except Exception:
+            continue
+
+
+def submit(page: Page, redirect_timeout_ms: int = 25_000) -> None:
+    """Clica em 'Enviar orçamento' e CONFIRMA o envio.
+
+    Contrato: retorna None em sucesso confirmado; levanta SubmitVerificationError
+    em qualquer caso não confirmado (valor abaixo do mínimo, sem redirect, erro de
+    validação, botão ausente). Assim o caller NUNCA marca como 'sent' um envio
+    que na verdade bugou — causa-raiz do "valor errado / passou e bugou".
+    """
+    # PRÉ-CHECK: validade HTML5 antes de clicar (pega valor abaixo do mínimo)
+    v = read_amount_validity(page)
+    if v is not None:
+        if v.get("rangeUnderflow"):
+            raise SubmitVerificationError(
+                f"Valor R$ {v.get('value')} abaixo do mínimo {v.get('min')} — HTML5 bloquearia o envio.",
+                kind="below_min",
+            )
+        if v.get("valueMissing"):
+            raise SubmitVerificationError("Campo de valor vazio.", kind="validation")
+        if not v.get("valid"):
+            raise SubmitVerificationError(
+                f"#Amount inválido (value={v.get('value')}, validity={v}).",
+                kind="validation",
+            )
+
+    if not _click_submit_button(page):
+        raise SubmitVerificationError(
+            "Nenhum botão 'Enviar orçamento' clicável encontrado no form.",
+            kind="no_button",
         )
 
+    # PÓS-CHECK: confirmar de verdade
     url_before = page.url
     try:
         page.wait_for_function(
-            "url => location.href !== url",
-            arg=url_before,
-            timeout=20_000,
+            "u => location.href !== u", arg=url_before, timeout=redirect_timeout_ms,
         )
-        logger.info("Redirecionado pra {}", page.url)
     except PWTimeout:
-        logger.warning("Sem redirect após click em 'Enviar orçamento' — verifique manualmente")
+        # Sem redirect: pode ser SPA com toast de sucesso OU erro silencioso.
+        if _has_success_toast(page):
+            logger.success("Envio confirmado via toast de sucesso")
+            return
+        _raise_if_form_error(page)  # levanta below_min/validation se achar mensagem
+        v2 = read_amount_validity(page)
+        if v2 is not None and v2.get("rangeUnderflow"):
+            raise SubmitVerificationError(
+                f"Bloqueado pelo mínimo após click (value={v2.get('value')}, min={v2.get('min')}).",
+                kind="below_min",
+            )
+        raise SubmitVerificationError(
+            "Sem redirect e sem toast de sucesso após 'Enviar orçamento' — envio NÃO confirmado.",
+            kind="no_redirect",
+        )
+
+    # Houve mudança de URL: garantir que não ficou na própria página /bid/ com erro
+    if "/messages/bid/" in (page.url or "").lower():
+        _raise_if_form_error(page)
+        raise SubmitVerificationError(
+            "Continua na página /bid/ após submit — envio não confirmado.",
+            kind="no_redirect",
+        )
+
+    logger.success("Envio confirmado — redirecionou pra {}", page.url)

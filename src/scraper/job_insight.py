@@ -5,6 +5,8 @@ from pathlib import Path
 from loguru import logger
 from playwright.sync_api import Page
 
+from src.utils.number import parse_money
+
 ROOT = Path(__file__).resolve().parents[2]
 INSIGHTS_DUMP_DIR = ROOT / "data" / "insights"
 
@@ -29,14 +31,9 @@ _AVG_RE_LABEL_FIRST = re.compile(
 
 
 def _parse_number(text: str) -> float | None:
-    m = _NUM_RE.search(text or "")
-    if not m:
-        return None
-    s = m.group(1).replace(".", "").replace(",", ".")
-    try:
-        return float(s)
-    except ValueError:
-        return None
+    # Delegado pro parser central, que entende BR (7.331,00) E US (780.00).
+    # O parser antigo (replace(".","").replace(",",".")) transformava 780.00 em 78000.
+    return parse_money(text)
 
 
 def _dump_html(page: Page, job_slug: str) -> Path:
