@@ -3,13 +3,13 @@
 
 # Palavras que SE aparecerem no título/descrição, descartam a vaga.
 blocked_keywords:
-  - wordpress
-  - php legado
-  - estagiário
-  - estagiario
-  - urgente!!
-  - urgent only
-  - clt
+  # - wordpress
+  # - php legado
+  # - estagiário
+  # - estagiario
+  # - urgente!!
+  # - urgent only
+  # - clt
   - presencial
 
 # Palavras que DEVEM aparecer (qualquer uma). Vazio = não filtra por keyword positivo.
