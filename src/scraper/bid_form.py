@@ -338,17 +338,19 @@ def _click_submit_button(page: Page) -> bool:
     return False
 
 
-def _click_confirm_modal(page: Page, timeout_ms: int = 4_000) -> bool:
+def _click_confirm_modal(page: Page, timeout_ms: int = 2_500) -> bool:
     """Se aparecer o modal de confirmação ('Atenção! … Continuar'), clica Continuar.
-    Best-effort: forms sem modal seguem direto. O modal é pré-renderizado mas escondido
-    (display:none no ancestral) — por isso exigimos state='visible' (e o texto 'Continuar'
-    é único entre os vários modais do form). Retorna True se clicou."""
+    Best-effort: forms sem modal seguem direto (a maioria envia direto, sem modal). O modal
+    é pré-renderizado mas escondido (display:none no ancestral) — por isso exigimos
+    state='visible' (e o texto 'Continuar' é único entre os vários modais do form).
+    Timeout curto pra não atrasar quando não há modal. Retorna True se clicou."""
     try:
         btn = page.wait_for_selector(
             ".modal-footer button.btn-primary:has-text('Continuar')",
             timeout=timeout_ms, state="visible",
         )
-    except PWTimeout:
+    except Exception:
+        # PWTimeout (sem modal) ou erro de navegação (o envio já redirecionou) → segue
         return False
     try:
         short_jitter()
@@ -456,14 +458,17 @@ def submit(page: Page, expected_amount: float | None = None, redirect_timeout_ms
     # Modal de confirmação ('Atenção! … Continuar'), quando aparece (ex.: projeto por hora).
     _click_confirm_modal(page)
 
-    # PÓS-CHECK: confirmar de verdade
-    url_before = page.url
+    # PÓS-CHECK: sucesso = SAIU da página de bid (redireciona pra /inbox/<slug>) OU o form
+    # sumiu (SPA com sucesso inline). Não depende de timing do redirect/modal — corrige o
+    # falso-negativo onde o envio dava certo mas era marcado como "Sem redirect".
+    success_predicate = (
+        "() => !location.href.includes('/messages/bid/') "
+        "|| !document.querySelector('form#bidForm')"
+    )
     try:
-        page.wait_for_function(
-            "u => location.href !== u", arg=url_before, timeout=redirect_timeout_ms,
-        )
+        page.wait_for_function(success_predicate, timeout=redirect_timeout_ms)
     except PWTimeout:
-        # Sem redirect: pode ser SPA com toast de sucesso OU erro silencioso.
+        # Continua na página de bid com o form → ou sucesso via toast, ou falha real.
         if _has_success_toast(page):
             logger.success("Envio confirmado via toast de sucesso")
             return
@@ -475,16 +480,8 @@ def submit(page: Page, expected_amount: float | None = None, redirect_timeout_ms
                 kind="below_min",
             )
         raise SubmitVerificationError(
-            "Sem redirect e sem toast de sucesso após 'Enviar orçamento' — envio NÃO confirmado.",
+            "Form continua aberto após 'Enviar orçamento' (sem redirect/sucesso) — envio NÃO confirmado.",
             kind="no_redirect",
         )
 
-    # Houve mudança de URL: garantir que não ficou na própria página /bid/ com erro
-    if "/messages/bid/" in (page.url or "").lower():
-        _raise_if_form_error(page)
-        raise SubmitVerificationError(
-            "Continua na página /bid/ após submit — envio não confirmado.",
-            kind="no_redirect",
-        )
-
-    logger.success("Envio confirmado — redirecionou pra {}", page.url)
+    logger.success("Envio confirmado — {}", page.url)
