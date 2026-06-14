@@ -20,6 +20,7 @@ class JobCard:
     date_text: str            # ex: "Publicado: 5 minutos"
     bids_count: int | None = None     # parseado de bids_text
     budget_value: float | None = None  # teto do orçamento (quando aparece no card)
+    is_featured: bool = False          # vaga patrocinada/destaque (project-item-featured)
 
 
 def _slug_from_url(url: str) -> str:
@@ -56,6 +57,7 @@ def scrape_page(page: Page) -> list[JobCard]:
 
         budget_text = budget_el.inner_text().strip() if budget_el else ""
         bids_text = bids_el.inner_text().strip() if bids_el else ""
+        css_class = c.get_attribute("class") or ""
         out.append(JobCard(
             slug=slug,
             title=title,
@@ -68,9 +70,25 @@ def scrape_page(page: Page) -> list[JobCard]:
             date_text=(date_el.inner_text().strip() if date_el else ""),
             bids_count=parse_int(bids_text),
             budget_value=parse_money_max(budget_text),
+            is_featured="project-item-featured" in css_class,
         ))
     logger.info("Coletados {} cards na página {}", len(out), page.url)
     return out
+
+
+def feed_exhausted(cards: list[JobCard], seen_slugs: set[str]) -> str | None:
+    """Detecta o fim dos resultados REAIS do feed. Retorna o motivo (str) pra parar,
+    ou None pra continuar. Gatilhos:
+      - página sem cards;
+      - página só com vagas patrocinadas (todas project-item-featured);
+      - página que só repete vagas já vistas neste run (Workana recicla as patrocinadas)."""
+    if not cards:
+        return "página sem cards"
+    if all(c.is_featured for c in cards):
+        return "página só com vagas patrocinadas"
+    if seen_slugs and all(c.slug in seen_slugs for c in cards):
+        return "página só repete vagas já vistas"
+    return None
 
 
 def has_next_page(page: Page) -> bool:
