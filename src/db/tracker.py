@@ -64,6 +64,27 @@ class Tracker:
         ).fetchall()
         return [{"slug": r["slug"], "payload": json.loads(r["payload_json"]), "created_at": r["created_at"]} for r in rows]
 
+    def all_draft_slugs(self) -> set[str]:
+        """Todas as vagas que JÁ têm draft (pendente/enviado/rejeitado) — não re-enfileirar."""
+        rows = self.conn.execute("SELECT slug FROM drafts").fetchall()
+        return {r["slug"] for r in rows}
+
+    def summary(self) -> dict:
+        """Contagens pra exibir no início do scrape: jobs_seen por state e drafts por status."""
+        jobs = {
+            r["state"]: r["n"]
+            for r in self.conn.execute(
+                "SELECT state, COUNT(*) AS n FROM jobs_seen GROUP BY state"
+            ).fetchall()
+        }
+        drafts = {
+            r["status"]: r["n"]
+            for r in self.conn.execute(
+                "SELECT status, COUNT(*) AS n FROM drafts GROUP BY status"
+            ).fetchall()
+        }
+        return {"jobs": jobs, "drafts": drafts}
+
     def mark_draft(self, slug: str, status: str) -> None:
         assert status in {"approved", "sent", "rejected"}
         self.conn.execute("UPDATE drafts SET status = ? WHERE slug = ?", (status, slug))
