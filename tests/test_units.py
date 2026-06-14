@@ -2,17 +2,19 @@
 from types import SimpleNamespace
 
 from src.filters.matcher import _cat_match, passes, passes_detail
-from src.scraper.jobs_list import JobCard
+from src.scraper.jobs_list import JobCard, feed_exhausted
 from src.utils.config import Settings
 from src.utils.number import parse_int, parse_money, parse_money_max
 
 
 def _card(slug="s", title="React app", skills=None, bids="Propostas: 3",
-          bids_count=3, budget_value=None, budget_text="", has_open_bid=True):
+          bids_count=3, budget_value=None, budget_text="", has_open_bid=True,
+          is_featured=False):
     return JobCard(
         slug=slug, title=title, url="u", action_text="Fazer uma proposta",
         has_open_bid=has_open_bid, budget_text=budget_text, skills=skills or ["React"],
         bids_text=bids, date_text="hoje", bids_count=bids_count, budget_value=budget_value,
+        is_featured=is_featured,
     )
 
 
@@ -98,6 +100,35 @@ def test_cat_match():
     assert not _cat_match("TI e Programação", "Marketing e Vendas")
 
 
+# ── feed_exhausted (parar no fim dos resultados reais) ─────────────────────
+def test_feed_continua_pagina_mista():
+    cards = [_card(slug="a", is_featured=True), _card(slug="b", is_featured=False)]
+    assert feed_exhausted(cards, set()) is None
+
+
+def test_feed_para_so_patrocinadas():
+    cards = [_card(slug="a", is_featured=True), _card(slug="b", is_featured=True)]
+    r = feed_exhausted(cards, set())
+    assert r and "patrocinad" in r
+
+
+def test_feed_para_so_repetidas():
+    cards = [_card(slug="a"), _card(slug="b")]
+    r = feed_exhausted(cards, {"a", "b"})
+    assert r and "repete" in r
+
+
+def test_feed_para_pagina_vazia():
+    r = feed_exhausted([], {"a"})
+    assert r and "sem cards" in r
+
+
+def test_feed_continua_pagina_nova_com_seen():
+    # página com vagas inéditas (não-featured) mesmo já tendo visto outras → continua
+    cards = [_card(slug="novo1"), _card(slug="novo2")]
+    assert feed_exhausted(cards, {"velho"}) is None
+
+
 # ── Settings presets de velocidade ─────────────────────────────────────────
 def test_speed_presets():
     cons = Settings.load(speed_override="conservador")
@@ -107,6 +138,43 @@ def test_speed_presets():
     assert rap.long_pause_chance == 0.0
     # default cai em equilibrado
     assert Settings.load(speed_override="invalido").speed_profile == "equilibrado"
+
+
+# ── tracker: dedup (drafts já salvos) + summary ────────────────────────────
+def test_tracker_all_draft_slugs_and_summary():
+    import tempfile
+    from pathlib import Path
+
+    from src.db.tracker import Tracker
+
+    db = Path(tempfile.mkdtemp()) / "t.db"
+    t = Tracker(db)
+    try:
+        t.upsert_job("a", "A", "ua", "drafted")
+        t.save_draft("a", {"x": 1})
+        t.upsert_job("b", "B", "ub", "drafted")
+        t.save_draft("b", {"x": 2})
+        t.mark_draft("b", "sent")
+        assert t.all_draft_slugs() == {"a", "b"}
+        s = t.summary()
+        assert s["drafts"].get("pending") == 1
+        assert s["drafts"].get("sent") == 1
+        assert s["jobs"].get("drafted") == 2
+    finally:
+        t.close()
+
+
+# ── approve.py: parsing das flags --all / --yes / --speed ──────────────────
+def test_approve_parse_args():
+    import approve
+    a = approve._parse_args(["--all"])
+    assert a.all and not a.yes and a.speed is None
+    a = approve._parse_args(["--all", "--yes", "--speed", "conservador"])
+    assert a.all and a.yes and a.speed == "conservador"
+    a = approve._parse_args(["-a", "-y"])
+    assert a.all and a.yes
+    a = approve._parse_args([])
+    assert not a.all and not a.yes and a.speed is None
 
 
 if __name__ == "__main__":
