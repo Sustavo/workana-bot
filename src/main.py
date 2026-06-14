@@ -59,6 +59,18 @@ def scrape(speed: str | None) -> None:
     drafted = 0
     aborted_reason: str | None = None
 
+    # Vagas que JÁ têm draft (pendente/enviado/rejeitado) — nunca re-enfileirar.
+    existing_drafts = tracker.all_draft_slugs()
+    sm = tracker.summary()
+    dft = sm["drafts"]
+    jbs = sm["jobs"]
+    logger.info(
+        "📂 Banco: {} vagas já com draft ({} pendentes, {} enviadas, {} rejeitadas) — "
+        "não serão re-enfileiradas | abertas: {}, puladas: {}",
+        len(existing_drafts), dft.get("pending", 0), dft.get("sent", 0), dft.get("rejected", 0),
+        jbs.get("open", 0), jbs.get("skipped", 0),
+    )
+
     with session.open_context(settings) as ctx:
         session.ensure_logged_in(ctx, settings.workana_jobs_url)
         page = ctx.pages[0]
@@ -75,6 +87,7 @@ def scrape(speed: str | None) -> None:
         with Dashboard(state, settings, enabled=not settings.headless) as dash:
             page_num = 1
             stop = False
+            seen_slugs: set[str] = set()
             while not stop:
                 sep = "&" if "?" in settings.workana_jobs_url else "?"
                 page_url = (
@@ -95,9 +108,11 @@ def scrape(speed: str | None) -> None:
                     continue  # bloqueio resolvido → re-tenta a mesma página
 
                 cards = jobs_list.scrape_page(page)
-                if not cards:
-                    logger.info("Página {} sem cards — fim do feed", page_num)
+                reason = jobs_list.feed_exhausted(cards, seen_slugs)
+                if reason:
+                    logger.info("Página {} — {} → fim dos resultados reais, parando.", page_num, reason)
                     break
+                seen_slugs.update(c.slug for c in cards)
 
                 for card in cards:
                     if drafted >= settings.max_drafts_per_run:
@@ -109,14 +124,15 @@ def scrape(speed: str | None) -> None:
                     if not card.has_open_bid:
                         logger.info("Pulando {} ({})", card.slug, card.action_text)
                         continue
+                    # Dedup direto pela tabela de drafts: já tem draft → não re-enfileira.
+                    if card.slug in existing_drafts:
+                        logger.info("Já tem draft pra {} — pulando (não re-enfileira)", card.slug)
+                        continue
                     ok, reason = passes(card, filters, profile_data)
                     if not ok:
                         tracker.upsert_job(card.slug, card.title, card.url, "skipped")
                         logger.info("Filtrado: {} → {}", card.slug, reason)
                         dash.mark_skipped(card.slug, reason)
-                        continue
-                    if tracker.job_state(card.slug) in {"drafted", "sent"}:
-                        logger.info("Já tem draft/envio pra {}", card.slug)
                         continue
 
                     dash.start_job(card.slug, card.title)
@@ -160,6 +176,7 @@ def scrape(speed: str | None) -> None:
                     }
                     tracker.save_draft(card.slug, payload)
                     tracker.upsert_job(card.slug, card.title, card.url, "drafted")
+                    existing_drafts.add(card.slug)
                     drafted += 1
                     dash.mark_generated(card.slug, gen.amount_brl, insight.avg_bid_value)
                     logger.success(
