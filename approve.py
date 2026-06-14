@@ -1,6 +1,7 @@
 """Review interativo dos drafts. Aprova → abre browser e envia."""
 from __future__ import annotations
 
+import argparse
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -102,17 +103,28 @@ def _print_draft(console: Console, slug: str, payload: dict, idx: int, total: in
     console.print(Panel(prop["content"], title="[yellow]Texto", border_style="yellow"))
 
 
-def _parse_speed_arg(argv: list[str]) -> str | None:
-    if "--speed" in argv:
-        i = argv.index("--speed")
-        if i + 1 < len(argv):
-            return argv[i + 1]
-    return None
+def _parse_args(argv: list[str]) -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        prog="approve.py", description="Revisa e envia os drafts de propostas."
+    )
+    p.add_argument(
+        "--speed", choices=["conservador", "equilibrado", "rapido"], default=None,
+        help="Perfil de velocidade (sobrepõe SPEED_PROFILE do .env).",
+    )
+    p.add_argument(
+        "--all", "-a", action="store_true", dest="all",
+        help="Aprova e envia TODOS os pendentes de uma vez, sem revisar um a um.",
+    )
+    p.add_argument(
+        "--yes", "-y", action="store_true", dest="yes",
+        help="Com --all, envia sem pedir confirmação.",
+    )
+    return p.parse_args(argv)
 
 
-def main() -> int:
-    speed = _parse_speed_arg(sys.argv[1:])
-    settings = Settings.load(speed_override=speed)
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(sys.argv[1:] if argv is None else argv)
+    settings = Settings.load(speed_override=args.speed)
     setup_logger(settings)
     logger.info("Velocidade: {}", settings.speed_summary())
     tracker = Tracker(settings.database_path)
@@ -129,48 +141,73 @@ def main() -> int:
 
     console = Console()
     total = len(drafts)
-    console.print(f"[bold cyan]{total}[/] drafts pendentes pra validar\n")
     approved: list[tuple[str, dict]] = []
     rejected_n = 0
     skipped_n = 0
-    for i, d in enumerate(drafts, start=1):
-        _print_draft(console, d["slug"], d["payload"], i, total)
-        ans = Prompt.ask(
-            "[bold]Aprovar e enviar?[/] [y]es / [n]o / [s]kip / [e]ditar e enviar",
-            choices=["y", "n", "s", "e"],
-            default="n",
-        )
-        if ans == "y":
-            approved.append((d["slug"], d["payload"]))
-            label = "[green]aprovado[/]"
-        elif ans == "e":
-            console.print("Cole o novo texto. Termine com uma linha contendo apenas '.':")
-            lines: list[str] = []
-            while True:
-                line = input()
-                if line.strip() == ".":
-                    break
-                lines.append(line)
-            d["payload"]["proposal"]["content"] = "\n".join(lines)
-            new_amount = Prompt.ask("Novo valor (R$)", default=str(d["payload"]["proposal"]["amount_brl"]))
-            d["payload"]["proposal"]["amount_brl"] = float(new_amount)
-            new_prazo = Prompt.ask("Novo prazo", default=d["payload"]["proposal"]["delivery_time"])
-            d["payload"]["proposal"]["delivery_time"] = new_prazo
-            approved.append((d["slug"], d["payload"]))
-            label = "[green]editado e aprovado[/]"
-        elif ans == "n":
-            tracker.mark_draft(d["slug"], "rejected")
-            rejected_n += 1
-            label = "[red]rejeitado[/]"
-        else:
-            skipped_n += 1
-            label = "[yellow]pulado[/]"
-        console.print(f"  → {label} | faltam [bold]{total - i}[/] pra validar\n")
 
-    console.print(
-        f"\nResumo da revisão: [green]{len(approved)} aprovados[/], "
-        f"[red]{rejected_n} rejeitados[/], [yellow]{skipped_n} pulados[/]"
-    )
+    if args.all:
+        # Botão "aprovar tudo": aprova todos os pendentes sem revisar (1 confirmação).
+        approved = [(d["slug"], d["payload"]) for d in drafts]
+        tbl = Table(title=f"[bold]{total}[/] propostas pendentes — modo --all (sem revisão)")
+        tbl.add_column("#", justify="right", style="dim")
+        tbl.add_column("Vaga")
+        tbl.add_column("Valor", justify="right")
+        tbl.add_column("Prazo")
+        for i, d in enumerate(drafts, start=1):
+            prop = d["payload"]["proposal"]
+            tbl.add_row(str(i), d["slug"][:50], f"R$ {prop['amount_brl']:.2f}",
+                        str(prop.get("delivery_time", "")))
+        console.print(tbl)
+        if not args.yes:
+            ans = Prompt.ask(
+                f"[bold red]Enviar TODAS as {total} propostas sem revisar?[/]",
+                choices=["y", "n"], default="n",
+            )
+            if ans != "y":
+                console.print("Cancelado. Nada enviado.")
+                tracker.close()
+                return 0
+        console.print(f"[bold green]{total} aprovadas[/] automaticamente (modo --all).\n")
+    else:
+        console.print(f"[bold cyan]{total}[/] drafts pendentes pra validar\n")
+        for i, d in enumerate(drafts, start=1):
+            _print_draft(console, d["slug"], d["payload"], i, total)
+            ans = Prompt.ask(
+                "[bold]Aprovar e enviar?[/] [y]es / [n]o / [s]kip / [e]ditar e enviar",
+                choices=["y", "n", "s", "e"],
+                default="n",
+            )
+            if ans == "y":
+                approved.append((d["slug"], d["payload"]))
+                label = "[green]aprovado[/]"
+            elif ans == "e":
+                console.print("Cole o novo texto. Termine com uma linha contendo apenas '.':")
+                lines: list[str] = []
+                while True:
+                    line = input()
+                    if line.strip() == ".":
+                        break
+                    lines.append(line)
+                d["payload"]["proposal"]["content"] = "\n".join(lines)
+                new_amount = Prompt.ask("Novo valor (R$)", default=str(d["payload"]["proposal"]["amount_brl"]))
+                d["payload"]["proposal"]["amount_brl"] = float(new_amount)
+                new_prazo = Prompt.ask("Novo prazo", default=d["payload"]["proposal"]["delivery_time"])
+                d["payload"]["proposal"]["delivery_time"] = new_prazo
+                approved.append((d["slug"], d["payload"]))
+                label = "[green]editado e aprovado[/]"
+            elif ans == "n":
+                tracker.mark_draft(d["slug"], "rejected")
+                rejected_n += 1
+                label = "[red]rejeitado[/]"
+            else:
+                skipped_n += 1
+                label = "[yellow]pulado[/]"
+            console.print(f"  → {label} | faltam [bold]{total - i}[/] pra validar\n")
+
+        console.print(
+            f"\nResumo da revisão: [green]{len(approved)} aprovados[/], "
+            f"[red]{rejected_n} rejeitados[/], [yellow]{skipped_n} pulados[/]"
+        )
 
     if not approved:
         print("Nada aprovado pra enviar. Saindo.")
