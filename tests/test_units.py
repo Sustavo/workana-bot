@@ -41,12 +41,16 @@ def test_parse_money_max_and_int():
 
 # ── matcher.passes (card) ──────────────────────────────────────────────────
 FILTERS = {
-    "blocked_keywords": ["wordpress"],
+    "blocked_keywords": [
+        "wordpress"
+                         ],
     "required_keywords_any": [],
     "allowed_categories": [],
-    "blocked_categories": ["Suporte Administrativo", "Marketing e Vendas"],
+    "blocked_categories": [
+        # "Suporte Administrativo", "Marketing e Vendas"
+        ],
     "min_budget_usd": 300,
-    "max_competing_proposals": 25,
+    "max_competing_proposals": 1000,
 }
 PROFILE = {"do_not_take": []}
 

@@ -27,7 +27,7 @@ languages: [pt, en]
 
 # O que você NÃO faz — a IA vai filtrar e o matcher vai vetar.
 do_not_take:
-  # - WordPress
+  - WordPress
   # - PHP legado
   # - Projetos de "urgência" sem contexto
   # - Estágio / vagas CLT
