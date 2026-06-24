@@ -1,7 +1,7 @@
 # Guia completo — workana-screp
 
 Bot **semi-automático** de propostas no Workana: lê o feed de vagas, filtra, gera a
-proposta com IA (Gemini), você revisa no terminal e ele envia pelo browser.
+proposta com IA (DeepSeek), você revisa no terminal e ele envia pelo browser.
 
 > **Filosofia:** nada é enviado sem você aprovar. O fluxo é dividido em **2 fases** —
 > primeiro gera rascunhos (não envia nada), depois você revisa e envia.
@@ -55,7 +55,7 @@ proposta com IA (Gemini), você revisa no terminal e ele envia pelo browser.
 | **Python** | 3.11 ou superior (o ambiente atual usa 3.12) |
 | **Google Chrome** | Instalado no sistema (o bot usa o Chrome real, não o Chromium). Já está em `/usr/bin/google-chrome`. |
 | **Conta Workana** | Logada manualmente na primeira execução |
-| **Chave Gemini** | Pegue em https://aistudio.google.com/app/apikey |
+| **Chave DeepSeek** | Crie em https://platform.deepseek.com/api_keys |
 
 ---
 
@@ -79,7 +79,7 @@ python -m playwright install chrome
 
 # 4. Cria seu .env a partir do exemplo
 cp .env.example .env
-# edite o .env e cole GOOGLE_API_KEY e WORKANA_USER_ID (ver seção 4)
+# edite o .env e cole DEEPSEEK_API_KEY e WORKANA_USER_ID (ver seção 4)
 ```
 
 > **Dica:** você pode rodar os comandos **sem ativar a venv** usando o caminho direto
@@ -96,8 +96,9 @@ e `config/filters.yaml` (critérios de filtragem).
 
 | Variável | Padrão | O que faz |
 |----------|--------|-----------|
-| `GOOGLE_API_KEY` | — | **(obrigatório)** Chave da API Gemini. |
-| `GEMINI_MODEL` | `gemini-2.5-flash-lite` | Modelo da IA. Opções: `gemini-2.5-flash-lite` (barato/rápido), `gemini-2.5-flash`, `gemini-2.5-pro` (melhor qualidade). |
+| `DEEPSEEK_API_KEY` | — | **(obrigatório)** Chave da API DeepSeek (crie em https://platform.deepseek.com/api_keys). |
+| `DEEPSEEK_MODEL` | `deepseek-v4-flash` | Modelo da IA. Opções: `deepseek-v4-flash` (barato/rápido), `deepseek-v4-pro` (melhor qualidade). |
+| `DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | Endpoint da API. Só mude se usar um gateway/proxy compatível. |
 | `WORKANA_JOBS_URL` | feed de TI | URL do feed **já com seus filtros** (categoria/idioma). |
 | `WORKANA_USER_ID` | — | Hash do seu perfil (ver 4.4). Usado para ler conexões restantes. |
 | `CHROME_PROFILE_DIR` | `./data/chrome-profile` | Pasta do perfil do Chrome (guarda o login). **Não apague.** |
@@ -248,7 +249,7 @@ redirect inesperado para login). Comportamento ao detectar problema:
 
 | Situação | O que o bot faz |
 |----------|-----------------|
-| **Erro da API do Gemini** (quota/429, chave inválida, serviço fora) | **Aborta** a execução e salva o que já foi feito (não adianta continuar). |
+| **Erro da API do DeepSeek** (saldo/402, chave inválida/401, ou indisponibilidade que sobreviveu aos retries) | **Aborta** a execução e salva o que já foi feito (não adianta continuar). |
 | **Atividade suspeita no Workana** (captcha/login/bloqueio) | **Pausa** e pede para você resolver na janela do browser e teclar **ENTER**; depois re-verifica e continua. Se continuar bloqueado, aborta. |
 | **Modo headless** (`HEADLESS=true`) | Como não dá para intervir, **aborta** ao detectar suspeita. |
 
@@ -303,7 +304,7 @@ sqlite3 data/workana.db "SELECT slug, amount, sent_at FROM submissions;"
 | Sintoma | Causa provável / solução |
 |---------|--------------------------|
 | **"Sessão NÃO autenticada"** | Faça login manualmente na janela do browser e tecle ENTER no terminal. |
-| **Aborta com erro do Gemini** | Quota/limite (429) ou chave inválida. Verifique `GOOGLE_API_KEY` e seu limite no AI Studio. |
+| **Aborta com erro do DeepSeek** | Saldo insuficiente (402), chave inválida (401) ou serviço fora após várias tentativas. Verifique `DEEPSEEK_API_KEY` e seu saldo em https://platform.deepseek.com. |
 | **Pausou pedindo intervenção** | O Workana mostrou captcha/bloqueio. Resolva na janela e tecle ENTER. Se acontecer muito, use `--speed conservador`. |
 | **Valor "errado" no envio** | Já corrigido: o bot ajusta o valor ao mínimo e confirma o envio. Se ainda houver falha, veja o relatório em `data/reports/`. |
 | **Seletor não encontrado / form mudou** | O Workana atualizou o HTML. Rode com `LOG_LEVEL=DEBUG`, veja `data/logs/run.log` e os dumps em `data/insights/debug/`. |
@@ -329,7 +330,7 @@ workana-screp/
 │   │   └── bid_form.py         # Preenche e ENVIA a proposta (mínimo + confirmação)
 │   ├── ai/
 │   │   ├── prompts.py          # Instrução de sistema + prompt
-│   │   └── generator.py        # Chamada ao Gemini (SDK google.genai)
+│   │   └── generator.py        # Chamada ao DeepSeek (SDK openai, compatível)
 │   ├── filters/matcher.py      # Decide se a vaga passa (card e detalhe)
 │   ├── db/
 │   │   ├── schema.sql          # Tabelas

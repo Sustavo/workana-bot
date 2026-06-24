@@ -45,8 +45,9 @@ def _env_int(name: str, default: int) -> int:
 
 @dataclass(frozen=True)
 class Settings:
-    google_api_key: str
-    gemini_model: str
+    deepseek_api_key: str
+    deepseek_model: str
+    deepseek_base_url: str
     workana_jobs_url: str
     workana_user_id: str
     chrome_profile_dir: Path
@@ -77,8 +78,9 @@ class Settings:
         preset = SPEED_PRESETS[profile]
 
         return cls(
-            google_api_key=os.getenv("GOOGLE_API_KEY", ""),
-            gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.0-flash"),
+            deepseek_api_key=os.getenv("DEEPSEEK_API_KEY", ""),
+            deepseek_model=os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"),
+            deepseek_base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
             workana_jobs_url=os.getenv(
                 "WORKANA_JOBS_URL",
                 "https://www.workana.com/jobs?language=en%2Cpt",

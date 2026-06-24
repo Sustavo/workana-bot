@@ -45,7 +45,7 @@ portfolio_links:
 #    e logar um aviso (pode falhar se o Workana exigir os 3).
 featured_portfolio_ids: []
 
-# Faixa de valor/hora em BRL (referência pro Gemini calcular preço justo).
+# Faixa de valor/hora em BRL (referência pra IA calcular preço justo).
 hourly_rate_brl_min: 5
 hourly_rate_brl_max: 5000
 
@@ -53,7 +53,7 @@ hourly_rate_brl_max: 5000
 bid_discount_pct: 0.10
 
 # Teto absoluto pro valor do bid em BRL — rede de segurança caso a média
-# dos concorrentes não esteja disponível e o Gemini chute alto.
+# dos concorrentes não esteja disponível e a IA chute alto.
 max_bid_brl: 20000
 
 # Teto pro valor por hora (R$/h) quando o form for "Valor total por hora".

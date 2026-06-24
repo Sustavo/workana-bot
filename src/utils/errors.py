@@ -2,7 +2,7 @@
 
 Hierarquia:
 - StopRun: algo grave aconteceu, ABORTE a run inteira (não adianta seguir).
-    - GeminiFatalError: erro de API do Gemini (quota/auth/indisponível) → abortar.
+    - AIFatalError: erro de API da IA/DeepSeek (quota/saldo/auth/indisponível) → abortar.
     - SuspiciousActivityError: Workana sinalizou bloqueio/captcha/atividade suspeita.
 - SubmitVerificationError: erro POR-VAGA no envio do bid. NÃO é StopRun: o caller
   deve registrar a falha mas NÃO marcar o draft como 'sent', e seguir pra próxima.
@@ -15,8 +15,10 @@ class StopRun(Exception):
     """Base: aborte a automação inteira de forma limpa."""
 
 
-class GeminiFatalError(StopRun):
-    """Erro da API do Gemini que não adianta continuar (quota/429, auth, indisponível)."""
+class AIFatalError(StopRun):
+    """Erro da API da IA (DeepSeek) que não adianta continuar agora: auth (401),
+    saldo insuficiente (402), permissão (403) ou indisponibilidade persistente
+    (429/5xx) que sobreviveu aos retries. → abortar a run."""
 
 
 class SuspiciousActivityError(StopRun):

@@ -12,7 +12,7 @@ from src.scraper import job_detail, job_insight, jobs_list, profile
 from src.ui.dashboard import Dashboard, DashState
 from src.utils.config import SPEED_PRESETS, Settings, load_filters, load_profile
 from src.utils.delays import human_sleep
-from src.utils.errors import GeminiFatalError, StopRun, SuspiciousActivityError
+from src.utils.errors import AIFatalError, StopRun, SuspiciousActivityError
 from src.utils.logger import setup_logger
 
 
@@ -24,10 +24,10 @@ def cli() -> None:
 def _react_to_stop(e: Exception, page, settings: Settings, dash: Dashboard) -> str | None:
     """Decide o que fazer com um StopRun. Retorna motivo de ABORT (str) ou None se
     foi resolvido (pode continuar). Comportamento inteligente (decisão do usuário):
-    - Gemini fatal → aborta (não adianta continuar).
+    - IA fatal (DeepSeek) → aborta (não adianta continuar).
     - Atividade suspeita → pausa e espera intervenção; se resolvida, continua."""
-    if isinstance(e, GeminiFatalError):
-        return f"erro fatal do Gemini: {e}"
+    if isinstance(e, AIFatalError):
+        return f"erro fatal da IA (DeepSeek): {e}"
     if isinstance(e, SuspiciousActivityError):
         with dash.paused():
             resolved = session.handle_suspicious(page, settings, e)

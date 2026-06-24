@@ -1,6 +1,6 @@
 # workana-screp
 
-Semi-automatiza envio de propostas no Workana. Lê o feed, gera draft com Gemini, você aprova no terminal, ele envia via browser headful.
+Semi-automatiza envio de propostas no Workana. Lê o feed, gera draft com DeepSeek, você aprova no terminal, ele envia via browser headful.
 
 ## Setup (uma vez só)
 
@@ -12,7 +12,7 @@ pip install -r requirements.txt
 python -m playwright install chromium
 
 cp .env.example .env
-# Edita .env: cola GOOGLE_API_KEY e WORKANA_USER_ID
+# Edita .env: cola DEEPSEEK_API_KEY e WORKANA_USER_ID
 ```
 
 Edita também:
@@ -34,7 +34,7 @@ O comando:
 1. Visita o feed (`WORKANA_JOBS_URL` do `.env`)
 2. Lê a quantidade de conexões restantes (Explorer = 52/semana)
 3. Pra cada card com botão "Fazer uma proposta", visita a página da vaga + a página de insight
-4. Joga tudo no Gemini → recebe `{content, amount_brl, delivery_time, hours_estimate}`
+4. Joga tudo no DeepSeek → recebe `{content, amount_brl, delivery_time, hours_estimate}`
 5. Salva como draft no SQLite
 
 Para no `MAX_DRAFTS_PER_RUN` (padrão 8).
@@ -70,7 +70,7 @@ src/
 │   └── bid_form.py       # Submissão da proposta
 ├── ai/
 │   ├── prompts.py        # System instruction
-│   └── generator.py      # Chamada ao Gemini
+│   └── generator.py      # Chamada ao DeepSeek (SDK openai)
 ├── db/
 │   ├── schema.sql
 │   └── tracker.py        # SQLite
@@ -87,11 +87,11 @@ approve.py                # Review interativo + envio
 - **Semi-automático com ENTER manual antes do submit**: mesmo aprovado no `approve.py`, ele pausa com o form preenchido pra você dar uma última conferida antes do clique. Reduz risco de enviar coisa estranha enquanto a confiança ainda é baixa.
 - **Bid form com 4 campos**: descobri lendo o HTML real do form que `bid[hours]` e `bid[deliveryTime]` existem além de `amount` e `content`. Preenchi todos pra cobrir tanto projeto fixo quanto por hora.
 - **Featured portfolio configurável**: como o modal de portfólio é Vue.js e os mesmos 3 sempre fazem sentido, virou config (`featured_portfolio_ids` no profile.yaml).
-- **Gemini 2.0 Flash por padrão**: barato e rápido. Se quiser propostas mais elaboradas, troca pra `gemini-1.5-pro` no `.env`.
+- **DeepSeek V4 Flash por padrão**: barato e rápido. Se quiser propostas mais elaboradas, troca pra `deepseek-v4-pro` no `.env`.
 
 ## Pendências que precisam de você
 
-- [ ] Preencher `GOOGLE_API_KEY` e `WORKANA_USER_ID` no `.env`
+- [ ] Preencher `DEEPSEEK_API_KEY` e `WORKANA_USER_ID` no `.env`
 - [ ] Preencher `featured_portfolio_ids` no `config/profile.yaml`
 - [ ] Revisar `config/profile.yaml` (links, skills, valores)
 - [ ] Primeira execução: logar manualmente quando o browser abrir
@@ -100,5 +100,5 @@ approve.py                # Review interativo + envio
 
 - **"Sessão não autenticada"** → loga manualmente no browser e dá ENTER no terminal.
 - **Seletor não encontrado** → o Workana atualizou o HTML. Roda com `LOG_LEVEL=DEBUG` e me manda o erro + um print novo da página.
-- **Gemini retorna JSON malformado** → temperatura muito alta ou prompt confuso; abre `src/ai/prompts.py` e ajusta.
+- **DeepSeek retorna JSON malformado** → temperatura muito alta ou prompt confuso; ajusta `_TEMPERATURE` em `src/ai/generator.py` ou o prompt em `src/ai/prompts.py`.
 - **Modal de portfólio não abre** → o seletor `#portfolioOpenBidDialog` mudou; me manda o HTML atualizado do bid form.

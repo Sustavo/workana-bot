@@ -2,14 +2,12 @@ import json
 import re
 from dataclasses import dataclass
 
-from google import genai
-from google.genai import errors as genai_errors
-from google.genai import types
 from loguru import logger
+from openai import APIConnectionError, APIStatusError, OpenAI
 
 from src.ai.prompts import SYSTEM_INSTRUCTION, build_user_prompt
 from src.utils.config import Settings, load_examples, load_profile
-from src.utils.errors import GeminiFatalError
+from src.utils.errors import AIFatalError
 
 
 @dataclass
@@ -22,31 +20,37 @@ class GeneratedProposal:
 
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 
-# Códigos HTTP de ClientError que NÃO adianta continuar (auth/quota) → abortar.
-_FATAL_CLIENT_CODES = {401, 403, 429}
-_FATAL_STR_MARKERS = (
-    "resource_exhausted", "resourceexhausted", "429", "quota", "permission_denied",
-    "permissiondenied", "unauthenticated", "api key", "api_key", "503",
-    "service_unavailable", "serviceunavailable", "rate limit", "exceeded",
-)
+# ── Parâmetros da chamada ao DeepSeek ──────────────────────────────────────────
+# DeepSeek é OpenAI-compatible: usamos o SDK `openai` apontado pro base_url dele.
+# response_format=json_object garante a ESTRUTURA do retorno independente da
+# temperatura, então dá pra usar uma temp moderada p/ variar o texto (evitar
+# clichê de IA) sem arriscar o JSON. Escala DeepSeek: 0.0 determinístico,
+# 1.0 equilibrado, 1.3 conversa, 1.5 criativo. Ajuste aqui se quiser.
+_TEMPERATURE = 1.0
+# Teto de saída. O default do DeepSeek é baixo e pode TRUNCAR o JSON → fixe alto.
+_MAX_TOKENS = 8192
+# Retries automáticos do SDK p/ erros transitórios (conexão, 429, 5xx) com backoff
+# e respeito ao Retry-After. Timeout alto porque, sob carga, o DeepSeek segura a
+# conexão aberta enquanto enfileira (keep-alive) em vez de devolver 503 na hora —
+# é justamente por isso que ele sofre menos com indisponibilidade que o Gemini.
+_MAX_RETRIES = 5
+_TIMEOUT_SECONDS = 600.0
+
+# HTTP que NÃO adianta repetir → aborta a run (vira AIFatalError):
+#   401 chave inválida · 402 saldo insuficiente · 403 sem permissão.
+_FATAL_STATUS = {401, 402, 403}
+# HTTP transitório: o SDK já re-tentou _MAX_RETRIES vezes; se ainda chegou aqui,
+# não adianta seguir nesta run → também vira AIFatalError (salva o progresso e para).
+_RETRYABLE_STATUS = {408, 409, 429, 500, 502, 503, 504}
 
 
-def _is_fatal_genai_error(e: Exception) -> bool:
-    """True quando não adianta continuar (quota/auth/serviço fora) → abortar a run.
-    Erros 4xx de request malformado (ex.: 400) são por-vaga (retornam False)."""
-    # 5xx do servidor (503 ServiceUnavailable, 500 etc.) → fatal
-    if isinstance(e, genai_errors.ServerError):
-        return True
-    # 4xx: só auth/quota são fatais
-    if isinstance(e, genai_errors.ClientError):
-        code = getattr(e, "code", None)
-        if code in _FATAL_CLIENT_CODES:
-            return True
-        s = f"{getattr(e, 'message', '')} {e}".lower()
-        return any(k in s for k in _FATAL_STR_MARKERS)
-    # fallback por string (erros de transporte/timeout, mudanças de versão)
-    s = f"{type(e).__name__}: {e}".lower()
-    return any(k in s for k in _FATAL_STR_MARKERS)
+def _client(settings: Settings) -> OpenAI:
+    return OpenAI(
+        api_key=settings.deepseek_api_key,
+        base_url=settings.deepseek_base_url,
+        max_retries=_MAX_RETRIES,
+        timeout=_TIMEOUT_SECONDS,
+    )
 
 
 def _profile_block(profile: dict) -> str:
@@ -66,37 +70,65 @@ def _build_system(profile: dict, examples: str) -> str:
 """
 
 
+def _create_completion(client: OpenAI, settings: Settings, system: str, user_prompt: str):
+    """Chama o chat completion do DeepSeek e CLASSIFICA o erro final.
+
+    O SDK já re-tenta sozinho os erros transitórios (conexão, 429, 5xx) _MAX_RETRIES
+    vezes com backoff. O que chega às exceções aqui é o resultado FINAL:
+      - 401/402/403 → AIFatalError (aborta a run: chave/saldo/permissão).
+      - 429/5xx/conexão que sobreviveram aos retries → AIFatalError (não adianta
+        seguir agora; o caller salva o progresso e para).
+      - 400/422/404 e demais → propaga como erro POR-VAGA (o caller pula a vaga).
+    """
+    try:
+        return client.chat.completions.create(
+            model=settings.deepseek_model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_prompt},
+            ],
+            response_format={"type": "json_object"},
+            temperature=_TEMPERATURE,
+            max_tokens=_MAX_TOKENS,
+            stream=False,
+        )
+    except APIConnectionError as e:
+        # rede/timeout (sem status_code) esgotou os retries do SDK → não adianta seguir
+        raise AIFatalError(f"DeepSeek inacessível (rede/timeout): {e}") from e
+    except APIStatusError as e:
+        status = getattr(e, "status_code", None)
+        if status in _FATAL_STATUS:
+            raise AIFatalError(
+                f"Erro fatal da API DeepSeek (HTTP {status} — chave/saldo/permissão): {e}"
+            ) from e
+        if status in _RETRYABLE_STATUS:
+            raise AIFatalError(
+                f"DeepSeek indisponível após {_MAX_RETRIES} tentativas (HTTP {status}): {e}"
+            ) from e
+        raise  # 400/422/404 etc.: request por-vaga inválido → pula a vaga, não aborta
+
+
 def generate(settings: Settings, job: dict, insight: dict | None) -> GeneratedProposal:
+    if not settings.deepseek_api_key:
+        raise AIFatalError(
+            "DEEPSEEK_API_KEY não configurada no .env — não dá pra gerar propostas."
+        )
+
     profile = load_profile()
     examples = load_examples()
     system = _build_system(profile, examples)
     discount = float(profile.get("bid_discount_pct", 0.10))
 
-    client = genai.Client(api_key=settings.google_api_key)
+    client = _client(settings)
     user_prompt = build_user_prompt(job, insight, discount)
     logger.debug("Prompt user ({} chars): {}", len(user_prompt), user_prompt[:200])
 
-    try:
-        resp = client.models.generate_content(
-            model=settings.gemini_model,
-            contents=user_prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=system,
-                temperature=0.6,
-                response_mime_type="application/json",
-            ),
-        )
-    except Exception as e:
-        if _is_fatal_genai_error(e):
-            raise GeminiFatalError(
-                f"Erro fatal da API Gemini ({type(e).__name__}): {e}"
-            ) from e
-        raise  # demais erros: tratados como por-vaga no caller
+    resp = _create_completion(client, settings, system, user_prompt)
 
-    raw = (getattr(resp, "text", None) or "")
+    raw = (resp.choices[0].message.content if resp.choices else None) or ""
     if not raw.strip():
-        # resposta vazia/bloqueada por safety → por-vaga (pula), não é fatal
-        raise ValueError("Gemini retornou resposta vazia (possível bloqueio de safety)")
+        # resposta vazia/bloqueada → por-vaga (pula), não é fatal
+        raise ValueError("DeepSeek retornou resposta vazia")
     match = _JSON_RE.search(raw)
     data = json.loads(match.group(0) if match else raw)
 
@@ -106,7 +138,7 @@ def generate(settings: Settings, job: dict, insight: dict | None) -> GeneratedPr
         target = round(float(avg) * (1 - discount))
         if abs(target - amount_brl) > 0.5:
             logger.info(
-                "Override amount_brl: Gemini={} → target={} (avg={} desc={:.0%})",
+                "Override amount_brl: IA={} → target={} (avg={} desc={:.0%})",
                 amount_brl, target, avg, discount,
             )
         amount_brl = float(target)
