@@ -46,6 +46,7 @@ def scrape(speed: str | None) -> None:
     """Lê o feed, filtra, gera drafts e salva em data/pending/ (via SQLite)."""
     settings = Settings.load(speed_override=speed)
     setup_logger(settings)
+    logger.info("IA: {}", settings.ai_summary())
     logger.info("Velocidade: {}", settings.speed_summary())
     filters = load_filters()
     profile_data = load_profile()

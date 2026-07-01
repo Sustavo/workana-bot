@@ -1,10 +1,25 @@
-"""Testes de unidade (sem browser): parsing de número, filtros e presets de velocidade."""
+"""Testes de unidade (sem browser): parsing de número, filtros, presets e provedores de IA."""
+import os
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 from src.filters.matcher import _cat_match, passes, passes_detail
 from src.scraper.jobs_list import JobCard, feed_exhausted
-from src.utils.config import Settings
+from src.utils.config import AI_PROVIDERS, Settings, _resolve_provider
 from src.utils.number import parse_int, parse_money, parse_money_max
+
+
+@contextmanager
+def _env(**overrides):
+    """Seta/limpa env vars temporariamente e restaura no fim (None = remover)."""
+    saved = {k: os.environ.get(k) for k in overrides}
+    try:
+        for k, v in overrides.items():
+            os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+        yield
+    finally:
+        for k, v in saved.items():
+            os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
 
 
 def _card(slug="s", title="React app", skills=None, bids="Propostas: 3",
@@ -179,6 +194,55 @@ def test_approve_parse_args():
     assert a.all and a.yes
     a = approve._parse_args([])
     assert not a.all and not a.yes and a.speed is None
+
+
+# ── Settings: seleção de provedor de IA (AI_PROVIDER) ──────────────────────
+def test_ai_provider_each_resolves():
+    # cada provedor resolve pro modelo mais barato + base_url + parâmetros corretos
+    expected = {
+        "deepseek": ("deepseek-v4-flash", "max_tokens", True),
+        "openai": ("gpt-5-nano", "max_completion_tokens", False),  # GPT-5: omite temperatura
+        "google": ("gemini-2.5-flash-lite", "max_tokens", True),
+        "qwen": ("qwen-flash", "max_tokens", True),
+    }
+    for prov, (model, tok, send_temp) in expected.items():
+        with _env(AI_PROVIDER=prov, AI_MODEL=None):
+            ai = _resolve_provider()
+        assert ai["provider"] == prov
+        assert ai["model"] == model, (prov, ai["model"])
+        assert ai["token_param"] == tok
+        assert ai["send_temperature"] is send_temp
+        assert ai["base_url"] == AI_PROVIDERS[prov]["base_url"]
+        assert ai["json_object"] is True
+    # extras de corpo específicos do provedor
+    with _env(AI_PROVIDER="openai", AI_MODEL=None):
+        assert _resolve_provider()["extra_body"] == {"reasoning_effort": "minimal"}
+    with _env(AI_PROVIDER="qwen", AI_MODEL=None):
+        assert _resolve_provider()["extra_body"] == {"enable_thinking": False}
+
+
+def test_ai_provider_invalid_falls_back_to_deepseek():
+    with _env(AI_PROVIDER="naoexiste", AI_MODEL=None):
+        assert _resolve_provider()["provider"] == "deepseek"
+    with _env(AI_PROVIDER=None, AI_MODEL=None):
+        assert _resolve_provider()["provider"] == "deepseek"
+
+
+def test_ai_model_overrides():
+    # AI_MODEL global ganha do default do provedor
+    with _env(AI_PROVIDER="openai", AI_MODEL="gpt-4.1-nano", OPENAI_MODEL=None):
+        assert _resolve_provider()["model"] == "gpt-4.1-nano"
+    # <PROVIDER>_MODEL é específico e ganha do AI_MODEL global
+    with _env(AI_PROVIDER="qwen", AI_MODEL="x-global", QWEN_MODEL="qwen-plus"):
+        assert _resolve_provider()["model"] == "qwen-plus"
+
+
+def test_ai_key_env_fallbacks():
+    # google aceita GEMINI_API_KEY como fallback; qwen aceita DASHSCOPE_API_KEY
+    with _env(AI_PROVIDER="google", GOOGLE_API_KEY=None, GEMINI_API_KEY="g-key"):
+        assert _resolve_provider()["api_key"] == "g-key"
+    with _env(AI_PROVIDER="qwen", QWEN_API_KEY=None, DASHSCOPE_API_KEY="d-key"):
+        assert _resolve_provider()["api_key"] == "d-key"
 
 
 if __name__ == "__main__":

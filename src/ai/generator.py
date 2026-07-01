@@ -20,34 +20,48 @@ class GeneratedProposal:
 
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 
-# ── Parâmetros da chamada ao DeepSeek ──────────────────────────────────────────
-# DeepSeek é OpenAI-compatible: usamos o SDK `openai` apontado pro base_url dele.
+# ── Parâmetros da chamada à IA ─────────────────────────────────────────────────
+# Todos os provedores suportados (DeepSeek/OpenAI/Google/Qwen) expõem um endpoint
+# OpenAI-compatible, então a chamada é a mesma p/ todos via SDK `openai`; muda só
+# api_key/base_url/model (resolvidos em Settings a partir de AI_PROVIDER).
 # response_format=json_object garante a ESTRUTURA do retorno independente da
 # temperatura, então dá pra usar uma temp moderada p/ variar o texto (evitar
-# clichê de IA) sem arriscar o JSON. Escala DeepSeek: 0.0 determinístico,
+# clichê de IA) sem arriscar o JSON. Escala típica: 0.0 determinístico,
 # 1.0 equilibrado, 1.3 conversa, 1.5 criativo. Ajuste aqui se quiser.
 _TEMPERATURE = 1.0
-# Teto de saída. O default do DeepSeek é baixo e pode TRUNCAR o JSON → fixe alto.
+# Teto de saída. O default de vários provedores é baixo e pode TRUNCAR o JSON → fixe alto.
 _MAX_TOKENS = 8192
 # Retries automáticos do SDK p/ erros transitórios (conexão, 429, 5xx) com backoff
-# e respeito ao Retry-After. Timeout alto porque, sob carga, o DeepSeek segura a
-# conexão aberta enquanto enfileira (keep-alive) em vez de devolver 503 na hora —
-# é justamente por isso que ele sofre menos com indisponibilidade que o Gemini.
+# e respeito ao Retry-After. Timeout alto porque sob carga alguns provedores seguram
+# a conexão aberta (keep-alive) em vez de devolver 503 na hora.
 _MAX_RETRIES = 5
 _TIMEOUT_SECONDS = 600.0
 
 # HTTP que NÃO adianta repetir → aborta a run (vira AIFatalError):
-#   401 chave inválida · 402 saldo insuficiente · 403 sem permissão.
+#   401 chave inválida · 402 saldo insuficiente (ex.: DeepSeek pré-pago) · 403 sem permissão.
 _FATAL_STATUS = {401, 402, 403}
 # HTTP transitório: o SDK já re-tentou _MAX_RETRIES vezes; se ainda chegou aqui,
 # não adianta seguir nesta run → também vira AIFatalError (salva o progresso e para).
 _RETRYABLE_STATUS = {408, 409, 429, 500, 502, 503, 504}
 
+# Marcadores de "problema de chave/auth" na mensagem. Necessário porque alguns
+# provedores (ex.: Google Gemini) devolvem HTTP 400 — não 401 — quando a chave é
+# inválida; aí escalamos p/ fatal em vez de tratar como erro por-vaga.
+_AUTH_ERROR_MARKERS = (
+    "api key", "api_key", "api-key", "apikey", "invalid key", "invalid api",
+    "unauthor", "permission", "credential", "authentication", "not valid",
+)
+
+
+def _looks_like_auth_error(e: Exception) -> bool:
+    s = f"{getattr(e, 'message', '')} {e}".lower()
+    return any(m in s for m in _AUTH_ERROR_MARKERS)
+
 
 def _client(settings: Settings) -> OpenAI:
     return OpenAI(
-        api_key=settings.deepseek_api_key,
-        base_url=settings.deepseek_base_url,
+        api_key=settings.ai_api_key,
+        base_url=settings.ai_base_url,
         max_retries=_MAX_RETRIES,
         timeout=_TIMEOUT_SECONDS,
     )
@@ -80,38 +94,57 @@ def _create_completion(client: OpenAI, settings: Settings, system: str, user_pro
         seguir agora; o caller salva o progresso e para).
       - 400/422/404 e demais → propaga como erro POR-VAGA (o caller pula a vaga).
     """
+    kwargs = dict(
+        model=settings.ai_model,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_prompt},
+        ],
+        stream=False,
+    )
+    # Teto de saída: nome do kwarg varia por provedor (GPT-5 usa max_completion_tokens).
+    kwargs[settings.ai_token_param] = _MAX_TOKENS
+    # Temperatura: alguns modelos (família GPT-5) só aceitam o default → omitimos.
+    if settings.ai_send_temperature:
+        kwargs["temperature"] = _TEMPERATURE
+    # Modo JSON nativo só onde o provedor/modelo suporta; senão, o _JSON_RE abaixo
+    # ainda extrai o objeto do texto (o prompt já exige só JSON).
+    if settings.ai_json_object:
+        kwargs["response_format"] = {"type": "json_object"}
+    # Extras do corpo específicos do provedor (reasoning_effort do OpenAI, enable_thinking
+    # do Qwen). Só envia se houver algo, pra não poluir provedores que não usam.
+    if settings.ai_extra_body:
+        kwargs["extra_body"] = settings.ai_extra_body
+
+    provider = settings.ai_provider
     try:
-        return client.chat.completions.create(
-            model=settings.deepseek_model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user_prompt},
-            ],
-            response_format={"type": "json_object"},
-            temperature=_TEMPERATURE,
-            max_tokens=_MAX_TOKENS,
-            stream=False,
-        )
+        return client.chat.completions.create(**kwargs)
     except APIConnectionError as e:
         # rede/timeout (sem status_code) esgotou os retries do SDK → não adianta seguir
-        raise AIFatalError(f"DeepSeek inacessível (rede/timeout): {e}") from e
+        raise AIFatalError(f"IA ({provider}) inacessível (rede/timeout): {e}") from e
     except APIStatusError as e:
         status = getattr(e, "status_code", None)
         if status in _FATAL_STATUS:
             raise AIFatalError(
-                f"Erro fatal da API DeepSeek (HTTP {status} — chave/saldo/permissão): {e}"
+                f"Erro fatal da IA ({provider}, HTTP {status} — chave/saldo/permissão): {e}"
             ) from e
         if status in _RETRYABLE_STATUS:
             raise AIFatalError(
-                f"DeepSeek indisponível após {_MAX_RETRIES} tentativas (HTTP {status}): {e}"
+                f"IA ({provider}) indisponível após {_MAX_RETRIES} tentativas (HTTP {status}): {e}"
             ) from e
-        raise  # 400/422/404 etc.: request por-vaga inválido → pula a vaga, não aborta
+        if _looks_like_auth_error(e):
+            # ex.: Google devolve 400 'API key not valid' → não adianta seguir
+            raise AIFatalError(
+                f"Erro fatal da IA ({provider}, HTTP {status} — chave inválida?): {e}"
+            ) from e
+        raise  # 400/422/404 genuínos: request por-vaga inválido → pula a vaga, não aborta
 
 
 def generate(settings: Settings, job: dict, insight: dict | None) -> GeneratedProposal:
-    if not settings.deepseek_api_key:
+    if not settings.ai_api_key:
         raise AIFatalError(
-            "DEEPSEEK_API_KEY não configurada no .env — não dá pra gerar propostas."
+            f"Chave da IA não configurada no .env (AI_PROVIDER={settings.ai_provider}) — "
+            f"preencha a env da chave desse provedor e tente de novo."
         )
 
     profile = load_profile()

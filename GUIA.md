@@ -55,7 +55,7 @@ proposta com IA (DeepSeek), você revisa no terminal e ele envia pelo browser.
 | **Python** | 3.11 ou superior (o ambiente atual usa 3.12) |
 | **Google Chrome** | Instalado no sistema (o bot usa o Chrome real, não o Chromium). Já está em `/usr/bin/google-chrome`. |
 | **Conta Workana** | Logada manualmente na primeira execução |
-| **Chave DeepSeek** | Crie em https://platform.deepseek.com/api_keys |
+| **Chave de IA** | De **um** provedor à sua escolha: DeepSeek, OpenAI, Google ou Qwen (ver seção 4.5 com preços) |
 
 ---
 
@@ -96,9 +96,14 @@ e `config/filters.yaml` (critérios de filtragem).
 
 | Variável | Padrão | O que faz |
 |----------|--------|-----------|
-| `DEEPSEEK_API_KEY` | — | **(obrigatório)** Chave da API DeepSeek (crie em https://platform.deepseek.com/api_keys). |
-| `DEEPSEEK_MODEL` | `deepseek-v4-flash` | Modelo da IA. Opções: `deepseek-v4-flash` (barato/rápido), `deepseek-v4-pro` (melhor qualidade). |
-| `DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | Endpoint da API. Só mude se usar um gateway/proxy compatível. |
+| `AI_PROVIDER` | `deepseek` | **Qual IA usar:** `deepseek`, `openai`, `google` ou `qwen` (preços na seção 4.5). |
+| `DEEPSEEK_API_KEY` | — | Chave do DeepSeek (obrigatória **se** `AI_PROVIDER=deepseek`). |
+| `OPENAI_API_KEY` | — | Chave da OpenAI (obrigatória **se** `AI_PROVIDER=openai`). |
+| `GOOGLE_API_KEY` | — | Chave do Google/Gemini (obrigatória **se** `AI_PROVIDER=google`; aceita `GEMINI_API_KEY`). |
+| `QWEN_API_KEY` | — | Chave do Qwen/DashScope (obrigatória **se** `AI_PROVIDER=qwen`; aceita `DASHSCOPE_API_KEY`). |
+| `<PROVIDER>_MODEL` | mais barato | Troca o modelo de um provedor (ex.: `OPENAI_MODEL=gpt-4.1-nano`). Vazio = padrão da seção 4.5. |
+| `AI_MODEL` | — | Override **global** de modelo (ganha de qualquer `<PROVIDER>_MODEL`). |
+| `AI_BASE_URL` | — | Endpoint custom (proxy/gateway, ou outra região do Qwen). Vazio = endpoint padrão do provedor. |
 | `WORKANA_JOBS_URL` | feed de TI | URL do feed **já com seus filtros** (categoria/idioma). |
 | `WORKANA_USER_ID` | — | Hash do seu perfil (ver 4.4). Usado para ler conexões restantes. |
 | `CHROME_PROFILE_DIR` | `./data/chrome-profile` | Pasta do perfil do Chrome (guarda o login). **Não apague.** |
@@ -151,6 +156,45 @@ Usado pela IA para escrever a proposta e calcular o valor. Campos importantes:
 - **`featured_portfolio_ids`**: no seu perfil, inspecione (F12) um item de portfólio e
   procure o atributo `data-id` (ou o id na URL do projeto). Pegue 3 e cole no
   `profile.yaml`.
+
+### 4.5. Provedores de IA (qual escolher e quanto custa)
+
+O bot fala com **um** provedor por vez, escolhido em `AI_PROVIDER`. Todos usam o mesmo
+SDK (`openai`) por baixo, então trocar é só mudar a env e pôr a chave do escolhido.
+Cada um já vem com o **modelo mais barato** como padrão.
+
+| `AI_PROVIDER` | Modelo padrão (mais barato) | US$/1M entrada | US$/1M saída | Onde pegar a chave | Tem teste grátis? |
+|---------------|-----------------------------|----------------|--------------|--------------------|-------------------|
+| `deepseek` | `deepseek-v4-flash` | **0,14** | **0,28** | https://platform.deepseek.com/api_keys | Não — **pré-pago**, precisa pôr saldo |
+| `openai` | `gpt-5-nano` | **0,05** | **0,40** | https://platform.openai.com/api-keys | Não — pré-pago |
+| `google` | `gemini-2.5-flash-lite` | **0,10** | **0,40** | https://aistudio.google.com/app/apikey | **Sim** — free tier com limites |
+| `qwen` | `qwen-flash` | **0,05** | **0,40** | https://bailian.console.alibabacloud.com (DashScope) | **Sim** — 1M tokens grátis/modelo (90 dias, endpoint intl) |
+
+> Preços USD por **1 milhão de tokens** (tier pago/standard, texto), conferidos em jun/2026
+> nas páginas oficiais. Uma proposta gasta ~1–2 mil tokens, então o custo por proposta é
+> de **frações de centavo** em qualquer um deles. Para referência: ~50 propostas/semana ≈
+> alguns centavos de dólar por mês.
+
+**Para começar barato/sem cartão:** use `google` (free tier no Google AI Studio) ou `qwen`
+(1M tokens grátis). **Menor custo pago:** `openai` (`gpt-5-nano`) e `qwen` empatam em
+US$ 0,05 de entrada.
+
+**Trocar o modelo de um provedor** (opcional): descomente o `<PROVIDER>_MODEL` no `.env`.
+Alternativas úteis:
+- **DeepSeek:** `deepseek-v4-pro` (melhor qualidade, ~US$ 0,44/0,87).
+- **OpenAI:** `gpt-4.1-nano` (US$ 0,10/0,40) — não tem as restrições da família GPT-5 (que
+  trava temperatura e usa `max_completion_tokens`); o bot já lida com isso automaticamente.
+- **Google:** `gemini-2.5-flash` (mais caro, melhor qualidade).
+- **Qwen:** `qwen-plus` (mais caro, melhor qualidade).
+
+**Detalhes que o bot já trata sozinho** (não precisa fazer nada): a família GPT-5 do OpenAI
+exige `max_completion_tokens` e temperatura fixa; o Qwen precisa rodar em modo *não-thinking*
+pro JSON funcionar; DeepSeek/Qwen exigem a palavra "json" no prompt. Tudo isso está embutido
+no `src/utils/config.py` (registro `AI_PROVIDERS`) e no `src/ai/generator.py`.
+
+> **Qwen e regiões:** o padrão é o endpoint internacional (Singapura). Se sua chave for de
+> outra região (China continental, EUA, HK), ajuste `AI_BASE_URL` no `.env` — as chaves
+> **não** são intercambiáveis entre regiões.
 
 ---
 
